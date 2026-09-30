@@ -28,7 +28,7 @@ arrow-array = "58.3.0"
 arrow-schema = "58.3.0"
 datafusion = { version = "54.1.0", default-features = false }
 futures = "0.3"
-sedona = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac" }
+sedona = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac", features = ["s2geography"] }
 sedona-extension = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac" }
 tokio = { version = "1.52", features = ["rt-multi-thread"] }
 

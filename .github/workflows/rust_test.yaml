@@ -17,6 +17,10 @@ defaults:
 permissions:
   contents: read
 
+env:
+  # At s2geometry updated to 0.13.0
+  VCPKG_REF: 580d480f750618f8affeb77abbb956e6eeaee0ce
+
 jobs:
   test:
     name: "Test/${{ matrix.platform }}_${{ matrix.arch }}"
@@ -38,6 +42,40 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Clone vcpkg
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ env.VCPKG_REF }}
+          path: vcpkg
+          persist-credentials: false
+
+      - name: Set up vcpkg
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-bincache
+          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          else
+            ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          fi
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_ENV"
+          echo "PATH=$VCPKG_ROOT:$PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_TOOLCHAIN_FILE=$CMAKE_TOOLCHAIN_FILE" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-1
+
+      - name: Install vcpkg dependencies
+        run: ./vcpkg/vcpkg install abseil openssl
 
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
