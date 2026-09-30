@@ -1,25 +1,29 @@
 # Copyright (c) 2026 ADBC Drivers Contributors
 # Licensed under the Apache License, Version 2.0.
 
-[package]
-name = "sedona-adbc"
-version = "0.5.0"
-license = "Apache-2.0"
-keywords = ["geospatial", "gis", "spatial", "datafusion", "arrow"]
-categories = ["science::geo", "database"]
-homepage = "https://github.com/apache/sedona-db"
-repository = "https://github.com/adbc-drivers/sedonadb"
-description = "ADBC driver for Apache SedonaDB"
-readme = "README.md"
-edition = "2024"
-rust-version = "1.88.0"
+[workspace]
+members = ["."]
+resolver = "2"
 
-[lints.clippy]
-result_large_err = "allow"
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/adbc-drivers/sedonadb"
+
+[package]
+name = "adbc-driver-sedonadb"
+description = "ADBC driver for Apache SedonaDB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 adbc_core = ">=0.24.0"
-adbc_ffi = ">=0.24.0"
+adbc_ffi = { version = ">=0.24.0", optional = true }
 arrow-array = "58.3.0"
 arrow-schema = "58.3.0"
 datafusion = { version = "54.1.0", default-features = false }
@@ -27,3 +31,13 @@ futures = "0.3"
 sedona = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac" }
 sedona-extension = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac" }
 tokio = { version = "1.52", features = ["rt-multi-thread"] }
+
+[features]
+default = ["ffi"]
+ffi = ["dep:adbc_ffi"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints.rust]
+linker_messages = "allow"
