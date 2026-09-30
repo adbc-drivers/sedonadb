@@ -1,16 +1,15 @@
 // Copyright (c) 2026 ADBC Drivers Contributors
 // Licensed under the Apache License, Version 2.0.
 
-// Because a number of methods only return Err() for not implemented,
-// the compiler doesn't know how to guess which impl RecordBatchReader
-// will be returned. When we implement the methods, we can remove this.
-#![allow(refining_impl_trait)]
-
 use adbc_core::{
     Connection,
     options::{InfoCode, ObjectDepth},
 };
 use arrow_array::RecordBatchReader;
+use datafusion::{
+    catalog::{CatalogProvider, CatalogProviderList, MemoryCatalogProviderList},
+    execution::runtime_env::RuntimeEnv,
+};
 use sedona::context::SedonaContext;
 use sedona_extension::runtime::RuntimeHandle;
 use std::sync::Arc;
@@ -26,6 +25,36 @@ use crate::{
     utils::OptionValueExt, utils::from_datafusion_error,
 };
 
+/// Exposes database-wide catalogs through Sedona's connection-local catalog
+/// wrapper so object-store discovery still uses the calling session's state.
+#[derive(Debug)]
+struct ConnectionCatalogProviderList {
+    shared: Arc<MemoryCatalogProviderList>,
+    session: Arc<dyn CatalogProviderList>,
+}
+
+impl CatalogProviderList for ConnectionCatalogProviderList {
+    fn register_catalog(
+        &self,
+        name: String,
+        catalog: Arc<dyn CatalogProvider>,
+    ) -> Option<Arc<dyn CatalogProvider>> {
+        self.shared.register_catalog(name, catalog)
+    }
+
+    fn catalog_names(&self) -> Vec<String> {
+        self.shared.catalog_names()
+    }
+
+    fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>> {
+        let catalog = self.shared.catalog(name)?;
+        // Install the shared provider into this session's original Sedona
+        // wrapper, then return its session-aware view of that provider.
+        self.session.register_catalog(name.to_string(), catalog);
+        self.session.catalog(name)
+    }
+}
+
 pub struct SedonaConnection {
     runtime: Arc<RuntimeHandle>,
     ctx: Arc<SedonaContext>,
@@ -34,35 +63,90 @@ pub struct SedonaConnection {
 
 impl SedonaConnection {
     pub(crate) fn try_new(
+        runtime: Arc<RuntimeHandle>,
+        runtime_env: Arc<RuntimeEnv>,
+        catalogs: Arc<MemoryCatalogProviderList>,
         opts: impl IntoIterator<Item = (OptionConnection, OptionValue)>,
     ) -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                Error::with_message_and_status(
-                    format!("Failed to build multithreaded runtime: {e}"),
-                    Status::Internal,
-                )
-            })?;
-
-        let ctx = runtime.block_on(async {
-            SedonaContext::new_local_interactive()
-                .await
-                .map_err(from_datafusion_error)
-        })?;
+        let ctx = runtime
+            .block_on(SedonaContext::new_local_interactive_with_runtime_env(
+                runtime_env,
+            ))
+            .map_err(from_datafusion_error)?;
+        let session_catalogs = ctx.ctx.state().catalog_list().clone();
+        ctx.ctx
+            .register_catalog_list(Arc::new(ConnectionCatalogProviderList {
+                shared: catalogs,
+                session: session_catalogs,
+            }));
 
         let mut connection = Self {
-            runtime: Arc::new(RuntimeHandle::new(runtime)),
+            runtime,
             ctx: Arc::new(ctx),
             autocommit_on: true,
         };
 
+        let mut current_catalog = None;
+        let mut current_schema = None;
+
         for (key, value) in opts {
-            connection.set_option(key, value)?;
+            match &key {
+                OptionConnection::CurrentCatalog => match value {
+                    OptionValue::String(value) => current_catalog = Some(value),
+                    _ => return Err(invalid_string_option(&key)),
+                },
+                OptionConnection::CurrentSchema => match value {
+                    OptionValue::String(value) => current_schema = Some(value),
+                    _ => return Err(invalid_string_option(&key)),
+                },
+                _ => connection.set_option(key, value)?,
+            }
+        }
+
+        if current_catalog.is_some() || current_schema.is_some() {
+            connection.set_current_catalog_and_schema(current_catalog, current_schema)?;
         }
 
         Ok(connection)
+    }
+
+    fn set_current_catalog_and_schema(
+        &self,
+        catalog_name: Option<String>,
+        schema_name: Option<String>,
+    ) -> Result<()> {
+        let state = self.ctx.ctx.state_ref();
+        let mut state = state.write();
+        let catalog_name =
+            catalog_name.unwrap_or_else(|| state.config_options().catalog.default_catalog.clone());
+        let schema_name =
+            schema_name.unwrap_or_else(|| state.config_options().catalog.default_schema.clone());
+        let catalog = state.catalog_list().catalog(&catalog_name).ok_or_else(|| {
+            Error::with_message_and_status(
+                format!("Catalog {catalog_name:?} does not exist"),
+                Status::NotFound,
+            )
+        })?;
+
+        if catalog.schema(&schema_name).is_none() {
+            return Err(Error::with_message_and_status(
+                format!("Schema {schema_name:?} does not exist in catalog {catalog_name:?}"),
+                Status::NotFound,
+            ));
+        }
+
+        let options = &mut state.config_mut().options_mut().catalog;
+        options.default_catalog = catalog_name;
+        options.default_schema = schema_name;
+        Ok(())
+    }
+
+    fn set_current_catalog(&self, catalog_name: String) -> Result<()> {
+        self.set_current_catalog_and_schema(Some(catalog_name), None)
+    }
+
+    fn set_current_schema(&self, schema_name: String) -> Result<()> {
+        self.set_current_catalog_and_schema(None, Some(schema_name))
     }
 }
 
@@ -75,6 +159,14 @@ impl Optionable for SedonaConnection {
                 self.autocommit_on = value.as_bool()?;
                 Ok(())
             }
+            OptionConnection::CurrentCatalog => match value {
+                OptionValue::String(value) => self.set_current_catalog(value),
+                _ => Err(invalid_string_option(&key)),
+            },
+            OptionConnection::CurrentSchema => match value {
+                OptionValue::String(value) => self.set_current_schema(value),
+                _ => Err(invalid_string_option(&key)),
+            },
             _ => err_unrecognized_option!(key),
         }
     }
@@ -86,6 +178,22 @@ impl Optionable for SedonaConnection {
             } else {
                 "false".to_string()
             }),
+            OptionConnection::CurrentCatalog => Ok(self
+                .ctx
+                .ctx
+                .state()
+                .config_options()
+                .catalog
+                .default_catalog
+                .clone()),
+            OptionConnection::CurrentSchema => Ok(self
+                .ctx
+                .ctx
+                .state()
+                .config_options()
+                .catalog
+                .default_schema
+                .clone()),
             _ => err_unrecognized_option!(key),
         }
     }
@@ -101,6 +209,13 @@ impl Optionable for SedonaConnection {
     fn get_option_double(&self, key: Self::Option) -> Result<f64> {
         err_unrecognized_option!(key)
     }
+}
+
+fn invalid_string_option(key: &OptionConnection) -> Error {
+    Error::with_message_and_status(
+        format!("Option {:?} must be a string", key.as_ref()),
+        Status::InvalidArguments,
+    )
 }
 
 impl Connection for SedonaConnection {
@@ -179,7 +294,9 @@ impl Connection for SedonaConnection {
 #[cfg(test)]
 mod test {
 
-    use adbc_core::{Database, Driver};
+    use adbc_core::{Database, Driver, Statement};
+    use datafusion::assert_batches_eq;
+    use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
 
     use crate::driver::SedonaDriver;
 
@@ -228,6 +345,245 @@ mod test {
         assert_eq!(
             err.to_string(),
             "InvalidArguments: Expected boolean option (sqlstate: 00000, vendor_code: 0)"
+        );
+    }
+
+    #[test]
+    fn current_catalog_and_schema() {
+        let mut connection = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap();
+
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "datafusion"
+        );
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "public"
+        );
+
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("public", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        catalog
+            .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        connection.ctx.ctx.register_catalog("secondary", catalog);
+
+        connection
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("secondary"),
+            )
+            .unwrap();
+        connection
+            .set_option(
+                OptionConnection::CurrentSchema,
+                OptionValue::from("analytics"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "secondary"
+        );
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "analytics"
+        );
+
+        let error = connection
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("missing"),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, Status::NotFound);
+
+        let error = connection
+            .set_option(
+                OptionConnection::CurrentSchema,
+                OptionValue::from("missing"),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, Status::NotFound);
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("other", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        connection.ctx.ctx.register_catalog("incompatible", catalog);
+        let error = connection
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("incompatible"),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, Status::NotFound);
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "secondary"
+        );
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "analytics"
+        );
+
+        let error = connection
+            .set_option(OptionConnection::CurrentCatalog, OptionValue::from(1_i64))
+            .unwrap_err();
+        assert_eq!(error.status, Status::InvalidArguments);
+    }
+
+    #[test]
+    fn connection_options_apply_catalog_and_schema_atomically() {
+        let database = SedonaDriver::default().new_database().unwrap();
+        let connection = database.new_connection().unwrap();
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        connection.ctx.ctx.register_catalog("secondary", catalog);
+
+        let error = database
+            .new_connection_with_opts([
+                (
+                    OptionConnection::CurrentCatalog,
+                    OptionValue::from("secondary"),
+                ),
+                (
+                    OptionConnection::CurrentSchema,
+                    OptionValue::from("missing"),
+                ),
+            ])
+            .err()
+            .unwrap();
+        assert_eq!(error.status, Status::NotFound);
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "datafusion"
+        );
+
+        let connection = database
+            .new_connection_with_opts([
+                (
+                    OptionConnection::CurrentSchema,
+                    OptionValue::from("analytics"),
+                ),
+                (
+                    OptionConnection::CurrentCatalog,
+                    OptionValue::from("secondary"),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "secondary"
+        );
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "analytics"
+        );
+    }
+
+    #[test]
+    fn connections_share_runtime_and_tables_but_not_session_state() {
+        let database = SedonaDriver::default().new_database().unwrap();
+        let mut first = database.new_connection().unwrap();
+        let mut second = database.new_connection().unwrap();
+
+        assert!(Arc::ptr_eq(
+            &first.ctx.ctx.runtime_env(),
+            &second.ctx.ctx.runtime_env()
+        ));
+        assert!(!Arc::ptr_eq(
+            &first.ctx.ctx.state_ref(),
+            &second.ctx.ctx.state_ref()
+        ));
+
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("public", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        catalog
+            .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        first.ctx.ctx.register_catalog("secondary", catalog);
+        first
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("secondary"),
+            )
+            .unwrap();
+        first
+            .set_option(
+                OptionConnection::CurrentSchema,
+                OptionValue::from("analytics"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            second
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "datafusion"
+        );
+        assert_eq!(
+            second
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "public"
+        );
+
+        let mut create = second.new_statement().unwrap();
+        create
+            .set_sql_query("CREATE TABLE shared_table AS SELECT 1 AS value")
+            .unwrap();
+        let _: Vec<_> = create
+            .execute()
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+
+        let mut query = database.new_connection().unwrap().new_statement().unwrap();
+        query
+            .set_sql_query("SELECT value FROM shared_table")
+            .unwrap();
+        let batches = query
+            .execute()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_batches_eq!(
+            [
+                "+-------+",
+                "| value |",
+                "+-------+",
+                "| 1     |",
+                "+-------+",
+            ],
+            &batches
         );
     }
 }

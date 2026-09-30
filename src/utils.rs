@@ -11,6 +11,7 @@ pub(crate) fn from_datafusion_error(value: DataFusionError) -> Error {
     let status = match &value {
         DataFusionError::IoError(_) => Status::IO,
         DataFusionError::NotImplemented(_) => Status::NotImplemented,
+        DataFusionError::Configuration(_) => Status::InvalidArguments,
         _ => Status::Internal,
     };
 
