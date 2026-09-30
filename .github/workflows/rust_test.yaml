@@ -17,17 +17,21 @@ defaults:
 permissions:
   contents: read
 
+env:
+  # At s2geometry updated to 0.13.0
+  VCPKG_REF: 580d480f750618f8affeb77abbb956e6eeaee0ce
+
 jobs:
   test:
     name: "Test/${{ matrix.platform }}_${{ matrix.arch }}"
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
-          - { platform: linux, arch: amd64, runner: ubuntu-latest }
-          - { platform: macos, arch: arm64, runner: macos-latest }
-          - { platform: windows, arch: amd64, runner: windows-latest }
+          - { platform: linux, arch: amd64, runner: ubuntu-latest, vcpkg_triplet: x64-linux }
+          - { platform: macos, arch: arm64, runner: macos-latest, vcpkg_triplet: arm64-osx }
+          - { platform: windows, arch: amd64, runner: windows-latest, vcpkg_triplet: x64-windows-static-md }
 
     steps:
       - name: Free disk space
@@ -39,18 +43,62 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Clone vcpkg
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ env.VCPKG_REF }}
+          path: vcpkg
+          persist-credentials: false
+
+      - name: Set up vcpkg
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-bincache
+          VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+          VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_triplet }}
+          VCPKG_MANIFEST_MODE: "OFF"
+          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          else
+            ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+          fi
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_TRIPLET=$VCPKG_DEFAULT_TRIPLET" >> "$GITHUB_ENV"
+          echo "VCPKG_TARGET_TRIPLET=$VCPKG_TARGET_TRIPLET" >> "$GITHUB_ENV"
+          echo "VCPKG_MANIFEST_MODE=$VCPKG_MANIFEST_MODE" >> "$GITHUB_ENV"
+          echo "$VCPKG_ROOT" >> "$GITHUB_PATH"
+          echo "CMAKE_TOOLCHAIN_FILE=$CMAKE_TOOLCHAIN_FILE" >> "$GITHUB_ENV"
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-4
+
+      - name: Install vcpkg dependencies
+        run: ./vcpkg/vcpkg install abseil geos openssl pkgconf s2geometry
+
+      - name: Set up static GEOS
+        env:
+          VCPKG_INSTALLED_DIR: ${{ github.workspace }}/vcpkg/installed/${{ matrix.vcpkg_triplet }}
+        run: |
+          echo "GEOS_STATIC=1" >> "$GITHUB_ENV"
+          pkg_config="$VCPKG_INSTALLED_DIR/tools/pkgconf/pkgconf"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pkg_config="${pkg_config}.exe"
+          fi
+          echo "PKG_CONFIG=$pkg_config" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$VCPKG_INSTALLED_DIR/lib/pkgconfig" >> "$GITHUB_ENV"
+
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           cache: true
           components: clippy
-
-      - name: Prepare build
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          ./ci/scripts/pre-build.sh test ${{ matrix.platform }} ${{ matrix.arch }}
-          source .env.build
-          echo "PROTOC=$PROTOC" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --locked
@@ -61,4 +109,5 @@ jobs:
           cargo test --locked
 
       - name: Clippy
+        if: matrix.platform == 'linux'
         run: cargo clippy --locked --no-deps -- -D warnings

@@ -4174,8 +4174,10 @@ dependencies = [
  "sedona-raster",
  "sedona-raster-functions",
  "sedona-raster-gdal",
+ "sedona-s2geography",
  "sedona-schema",
  "sedona-spatial-join",
+ "sedona-spatial-join-geography",
  "sedona-spatial-join-raster",
  "sedona-testing",
  "sedona-tg",
@@ -4513,6 +4515,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "sedona-s2geography"
+version = "0.5.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "cmake",
+ "datafusion-common",
+ "datafusion-expr",
+ "errno",
+ "geo-traits",
+ "paste",
+ "regex",
+ "sedona-common",
+ "sedona-expr",
+ "sedona-extension",
+ "sedona-functions",
+ "sedona-geometry",
+ "sedona-schema",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "sedona-schema"
 version = "0.5.0"
 source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
@@ -4567,6 +4592,32 @@ dependencies = [
  "sedona-schema",
  "sedona-tg",
  "tokio",
+ "wkb",
+]
+
+[[package]]
+name = "sedona-spatial-join-geography"
+version = "0.5.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+dependencies = [
+ "arrow",
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-execution",
+ "datafusion-physical-expr",
+ "datafusion-physical-plan",
+ "log",
+ "parking_lot",
+ "sedona-common",
+ "sedona-expr",
+ "sedona-functions",
+ "sedona-query-planner",
+ "sedona-s2geography",
+ "sedona-schema",
+ "sedona-spatial-join",
  "wkb",
 ]
 
