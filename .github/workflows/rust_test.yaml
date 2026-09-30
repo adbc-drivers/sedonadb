@@ -71,7 +71,7 @@ jobs:
           echo "VCPKG_DEFAULT_TRIPLET=$VCPKG_DEFAULT_TRIPLET" >> "$GITHUB_ENV"
           echo "VCPKG_TARGET_TRIPLET=$VCPKG_TARGET_TRIPLET" >> "$GITHUB_ENV"
           echo "VCPKG_MANIFEST_MODE=$VCPKG_MANIFEST_MODE" >> "$GITHUB_ENV"
-          echo "PATH=$VCPKG_ROOT:$PATH" >> "$GITHUB_ENV"
+          echo "$VCPKG_ROOT" >> "$GITHUB_PATH"
           echo "CMAKE_TOOLCHAIN_FILE=$CMAKE_TOOLCHAIN_FILE" >> "$GITHUB_ENV"
 
       - name: Cache vcpkg binaries
