@@ -1,7 +1,6 @@
 # Copyright (c) 2026 ADBC Drivers Contributors
 # Licensed under the Apache License, Version 2.0.
 
-
 [package]
 name = "sedona-adbc"
 version = "0.5.0"
