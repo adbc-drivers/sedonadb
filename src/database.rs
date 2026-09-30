@@ -8,6 +8,13 @@ use adbc_core::{
     error::{Error, Result, Status},
     options::{OptionConnection, OptionDatabase, OptionValue},
 };
+use datafusion::{
+    catalog::{
+        CatalogProvider, CatalogProviderList, MemoryCatalogProvider, MemoryCatalogProviderList,
+        MemorySchemaProvider,
+    },
+    execution::runtime_env::RuntimeEnv,
+};
 use sedona::{context::SedonaContext, context_builder::SedonaContextBuilder};
 use sedona_extension::runtime::RuntimeHandle;
 
@@ -118,7 +125,8 @@ fn invalid_option(key: &OptionDatabase, message: &str) -> Error {
 
 pub struct SedonaDatabase {
     runtime: Arc<RuntimeHandle>,
-    ctx: Arc<SedonaContext>,
+    runtime_env: Arc<RuntimeEnv>,
+    catalogs: Arc<MemoryCatalogProviderList>,
     options: DatabaseOptions,
 }
 
@@ -139,13 +147,26 @@ impl SedonaDatabase {
 
         let builder = SedonaContextBuilder::from_options(&options.runtime_options())
             .map_err(from_datafusion_error)?;
+        let runtime_env = builder.build_runtime_env().map_err(from_datafusion_error)?;
         let ctx = runtime
-            .block_on(builder.build())
+            .block_on(SedonaContext::new_local_interactive_with_runtime_env(
+                runtime_env.clone(),
+            ))
             .map_err(from_datafusion_error)?;
+        let state = ctx.ctx.state();
+        let default_catalog = state.config_options().catalog.default_catalog.clone();
+        let default_schema = state.config_options().catalog.default_schema.clone();
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema(&default_schema, Arc::new(MemorySchemaProvider::new()))
+            .map_err(from_datafusion_error)?;
+        let catalogs = Arc::new(MemoryCatalogProviderList::new());
+        catalogs.register_catalog(default_catalog, catalog);
 
         Ok(Self {
             runtime: Arc::new(RuntimeHandle::new(runtime)),
-            ctx: Arc::new(ctx),
+            runtime_env,
+            catalogs,
             options,
         })
     }
@@ -213,7 +234,12 @@ impl Database for SedonaDatabase {
         &self,
         opts: impl IntoIterator<Item = (OptionConnection, OptionValue)>,
     ) -> Result<SedonaConnection> {
-        SedonaConnection::new(self.runtime.clone(), self.ctx.clone(), opts)
+        SedonaConnection::try_new(
+            self.runtime.clone(),
+            self.runtime_env.clone(),
+            self.catalogs.clone(),
+            opts,
+        )
     }
 }
 
@@ -245,7 +271,7 @@ mod test {
             .unwrap();
 
         assert!(matches!(
-            database.ctx.ctx.runtime_env().memory_pool.memory_limit(),
+            database.runtime_env.memory_pool.memory_limit(),
             MemoryLimit::Finite(limit) if limit == 32 * 1024 * 1024
         ));
         assert_eq!(

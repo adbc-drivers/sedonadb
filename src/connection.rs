@@ -6,6 +6,10 @@ use adbc_core::{
     options::{InfoCode, ObjectDepth},
 };
 use arrow_array::RecordBatchReader;
+use datafusion::{
+    catalog::{CatalogProvider, CatalogProviderList, MemoryCatalogProviderList},
+    execution::runtime_env::RuntimeEnv,
+};
 use sedona::context::SedonaContext;
 use sedona_extension::runtime::RuntimeHandle;
 use std::sync::Arc;
@@ -17,8 +21,39 @@ use adbc_core::{
 };
 
 use crate::{
-    err_not_implemented, err_unrecognized_option, statement::SedonaStatement, utils::OptionValueExt,
+    err_not_implemented, err_unrecognized_option, statement::SedonaStatement,
+    utils::OptionValueExt, utils::from_datafusion_error,
 };
+
+/// Exposes database-wide catalogs through Sedona's connection-local catalog
+/// wrapper so object-store discovery still uses the calling session's state.
+#[derive(Debug)]
+struct ConnectionCatalogProviderList {
+    shared: Arc<MemoryCatalogProviderList>,
+    session: Arc<dyn CatalogProviderList>,
+}
+
+impl CatalogProviderList for ConnectionCatalogProviderList {
+    fn register_catalog(
+        &self,
+        name: String,
+        catalog: Arc<dyn CatalogProvider>,
+    ) -> Option<Arc<dyn CatalogProvider>> {
+        self.shared.register_catalog(name, catalog)
+    }
+
+    fn catalog_names(&self) -> Vec<String> {
+        self.shared.catalog_names()
+    }
+
+    fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>> {
+        let catalog = self.shared.catalog(name)?;
+        // Install the shared provider into this session's original Sedona
+        // wrapper, then return its session-aware view of that provider.
+        self.session.register_catalog(name.to_string(), catalog);
+        self.session.catalog(name)
+    }
+}
 
 pub struct SedonaConnection {
     runtime: Arc<RuntimeHandle>,
@@ -27,14 +62,27 @@ pub struct SedonaConnection {
 }
 
 impl SedonaConnection {
-    pub(crate) fn new(
+    pub(crate) fn try_new(
         runtime: Arc<RuntimeHandle>,
-        ctx: Arc<SedonaContext>,
+        runtime_env: Arc<RuntimeEnv>,
+        catalogs: Arc<MemoryCatalogProviderList>,
         opts: impl IntoIterator<Item = (OptionConnection, OptionValue)>,
     ) -> Result<Self> {
+        let ctx = runtime
+            .block_on(SedonaContext::new_local_interactive_with_runtime_env(
+                runtime_env,
+            ))
+            .map_err(from_datafusion_error)?;
+        let session_catalogs = ctx.ctx.state().catalog_list().clone();
+        ctx.ctx
+            .register_catalog_list(Arc::new(ConnectionCatalogProviderList {
+                shared: catalogs,
+                session: session_catalogs,
+            }));
+
         let mut connection = Self {
             runtime,
-            ctx,
+            ctx: Arc::new(ctx),
             autocommit_on: true,
         };
 
@@ -275,7 +323,8 @@ impl Connection for SedonaConnection {
 #[cfg(test)]
 mod test {
 
-    use adbc_core::{Database, Driver};
+    use adbc_core::{Database, Driver, Statement};
+    use datafusion::assert_batches_eq;
     use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
 
     use crate::driver::SedonaDriver;
@@ -457,6 +506,83 @@ mod test {
                 .get_option_string(OptionConnection::CurrentSchema)
                 .unwrap(),
             "analytics"
+        );
+    }
+
+    #[test]
+    fn connections_share_runtime_and_tables_but_not_session_state() {
+        let database = SedonaDriver::default().new_database().unwrap();
+        let mut first = database.new_connection().unwrap();
+        let mut second = database.new_connection().unwrap();
+
+        assert!(Arc::ptr_eq(
+            &first.ctx.ctx.runtime_env(),
+            &second.ctx.ctx.runtime_env()
+        ));
+        assert!(!Arc::ptr_eq(
+            &first.ctx.ctx.state_ref(),
+            &second.ctx.ctx.state_ref()
+        ));
+
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        first.ctx.ctx.register_catalog("secondary", catalog);
+        first
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("secondary"),
+            )
+            .unwrap();
+        first
+            .set_option(
+                OptionConnection::CurrentSchema,
+                OptionValue::from("analytics"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            second
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "datafusion"
+        );
+        assert_eq!(
+            second
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "public"
+        );
+
+        let mut create = second.new_statement().unwrap();
+        create
+            .set_sql_query("CREATE TABLE shared_table AS SELECT 1 AS value")
+            .unwrap();
+        let _: Vec<_> = create
+            .execute()
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+
+        let mut query = database.new_connection().unwrap().new_statement().unwrap();
+        query
+            .set_sql_query("SELECT value FROM shared_table")
+            .unwrap();
+        let batches = query
+            .execute()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_batches_eq!(
+            [
+                "+-------+",
+                "| value |",
+                "+-------+",
+                "| 1     |",
+                "+-------+",
+            ],
+            &batches
         );
     }
 }
