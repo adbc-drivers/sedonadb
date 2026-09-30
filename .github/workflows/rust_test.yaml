@@ -26,7 +26,7 @@ jobs:
     name: "Test/${{ matrix.platform }}_${{ matrix.arch }}"
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - { platform: linux, arch: amd64, runner: ubuntu-latest, vcpkg_triplet: x64-linux }
@@ -95,14 +95,6 @@ jobs:
         with:
           cache: true
           components: clippy
-
-      - name: Prepare build
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          ./ci/scripts/pre-build.sh test ${{ matrix.platform }} ${{ matrix.arch }}
-          source .env.build
-          echo "PROTOC=$PROTOC" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --locked
