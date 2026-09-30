@@ -93,12 +93,16 @@ impl Optionable for SedonaStatement {
 
     fn get_option_string(&self, key: Self::Option) -> Result<String> {
         match &key {
-            OptionStatement::TargetTable => self.ingest.target_table.clone().ok_or_else(|| {
-                Error::with_message_and_status(
-                    format!("Option {:?} has not been set", key.as_ref()),
-                    Status::NotFound,
-                )
-            }),
+            OptionStatement::TargetTable => option_value(&key, &self.ingest.target_table),
+            OptionStatement::TargetCatalog => option_value(&key, &self.ingest.target_catalog),
+            OptionStatement::TargetDbSchema => option_value(&key, &self.ingest.target_schema),
+            OptionStatement::IngestMode => Ok(self.ingest.mode.into()),
+            OptionStatement::Temporary => Ok(if self.ingest.temporary {
+                constants::ADBC_OPTION_VALUE_ENABLED
+            } else {
+                constants::ADBC_OPTION_VALUE_DISABLED
+            }
+            .to_string()),
             _ => err_unrecognized_option!(key),
         }
     }
@@ -114,6 +118,15 @@ impl Optionable for SedonaStatement {
     fn get_option_double(&self, key: Self::Option) -> Result<f64> {
         err_unrecognized_option!(key)
     }
+}
+
+fn option_value(key: &OptionStatement, value: &Option<String>) -> Result<String> {
+    value.clone().ok_or_else(|| {
+        Error::with_message_and_status(
+            format!("Option {:?} has not been set", key.as_ref()),
+            Status::NotFound,
+        )
+    })
 }
 
 fn option_string(key: &OptionStatement, value: OptionValue) -> Result<String> {
@@ -201,7 +214,7 @@ mod test {
     use std::ops::Deref;
 
     use adbc_core::{
-        Connection, Database, Driver, Optionable, Statement,
+        Connection, Database, Driver, Optionable, Statement, constants,
         error::Status,
         options::{IngestMode, OptionStatement, OptionValue},
     };
@@ -313,6 +326,30 @@ mod test {
                 .get_option_string(OptionStatement::TargetTable)
                 .unwrap(),
             "observations"
+        );
+        assert_eq!(
+            statement
+                .get_option_string(OptionStatement::TargetCatalog)
+                .unwrap(),
+            "datafusion"
+        );
+        assert_eq!(
+            statement
+                .get_option_string(OptionStatement::TargetDbSchema)
+                .unwrap(),
+            "public"
+        );
+        assert_eq!(
+            statement
+                .get_option_string(OptionStatement::IngestMode)
+                .unwrap(),
+            String::from(IngestMode::CreateAppend)
+        );
+        assert_eq!(
+            statement
+                .get_option_string(OptionStatement::Temporary)
+                .unwrap(),
+            constants::ADBC_OPTION_VALUE_DISABLED
         );
 
         let error = statement

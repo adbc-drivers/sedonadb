@@ -38,11 +38,59 @@ impl SedonaConnection {
             autocommit_on: true,
         };
 
+        let mut current_catalog = None;
+        let mut current_schema = None;
+
         for (key, value) in opts {
-            connection.set_option(key, value)?;
+            match &key {
+                OptionConnection::CurrentCatalog => match value {
+                    OptionValue::String(value) => current_catalog = Some(value),
+                    _ => return Err(invalid_string_option(&key)),
+                },
+                OptionConnection::CurrentSchema => match value {
+                    OptionValue::String(value) => current_schema = Some(value),
+                    _ => return Err(invalid_string_option(&key)),
+                },
+                _ => connection.set_option(key, value)?,
+            }
+        }
+
+        if current_catalog.is_some() || current_schema.is_some() {
+            connection.set_current_catalog_and_schema(current_catalog, current_schema)?;
         }
 
         Ok(connection)
+    }
+
+    fn set_current_catalog_and_schema(
+        &self,
+        catalog_name: Option<String>,
+        schema_name: Option<String>,
+    ) -> Result<()> {
+        let state = self.ctx.ctx.state_ref();
+        let mut state = state.write();
+        let catalog_name =
+            catalog_name.unwrap_or_else(|| state.config_options().catalog.default_catalog.clone());
+        let schema_name =
+            schema_name.unwrap_or_else(|| state.config_options().catalog.default_schema.clone());
+        let catalog = state.catalog_list().catalog(&catalog_name).ok_or_else(|| {
+            Error::with_message_and_status(
+                format!("Catalog {catalog_name:?} does not exist"),
+                Status::NotFound,
+            )
+        })?;
+
+        if catalog.schema(&schema_name).is_none() {
+            return Err(Error::with_message_and_status(
+                format!("Schema {schema_name:?} does not exist in catalog {catalog_name:?}"),
+                Status::NotFound,
+            ));
+        }
+
+        let options = &mut state.config_mut().options_mut().catalog;
+        options.default_catalog = catalog_name;
+        options.default_schema = schema_name;
+        Ok(())
     }
 
     fn set_current_catalog(&self, catalog_name: String) -> Result<()> {
@@ -353,5 +401,62 @@ mod test {
             .set_option(OptionConnection::CurrentCatalog, OptionValue::from(1_i64))
             .unwrap_err();
         assert_eq!(error.status, Status::InvalidArguments);
+    }
+
+    #[test]
+    fn connection_options_apply_catalog_and_schema_atomically() {
+        let database = SedonaDriver::default().new_database().unwrap();
+        let connection = database.new_connection().unwrap();
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        connection.ctx.ctx.register_catalog("secondary", catalog);
+
+        let error = database
+            .new_connection_with_opts([
+                (
+                    OptionConnection::CurrentCatalog,
+                    OptionValue::from("secondary"),
+                ),
+                (
+                    OptionConnection::CurrentSchema,
+                    OptionValue::from("missing"),
+                ),
+            ])
+            .err()
+            .unwrap();
+        assert_eq!(error.status, Status::NotFound);
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "datafusion"
+        );
+
+        let connection = database
+            .new_connection_with_opts([
+                (
+                    OptionConnection::CurrentSchema,
+                    OptionValue::from("analytics"),
+                ),
+                (
+                    OptionConnection::CurrentCatalog,
+                    OptionValue::from("secondary"),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "secondary"
+        );
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "analytics"
+        );
     }
 }
