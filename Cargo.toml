@@ -1,0 +1,43 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/adbc-drivers/sedonadb"
+
+[workspace.dependencies]
+adbc_core = "0.23.0"
+adbc_ffi = "0.23.0"
+adbc-driver-datafusion = { git = "https://github.com/adbc-drivers/datafusion.git", rev = "818eaaf791f68e9224dc6cd91f7ed0cfc08f4102", default-features = false }
+sedona = { git = "https://github.com/apache/sedona-db.git", rev = "84d9b7bea8e9449e81358dd5669b8942c2c75779", default-features = false }
+tokio = { version = "1.49", features = ["rt-multi-thread"] }
+
+[package]
+name = "adbc-driver-sedonadb"
+description = "ADBC driver for Apache SedonaDB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adbc_core.workspace = true
+adbc_ffi = { workspace = true, optional = true }
+adbc-driver-datafusion.workspace = true
+sedona.workspace = true
+tokio.workspace = true
+
+[features]
+default = ["ffi"]
+ffi = ["dep:adbc_ffi"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints.rust]
+linker_messages = "allow"

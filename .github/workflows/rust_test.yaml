@@ -1,0 +1,64 @@
+name: Rust Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: "Test/${{ matrix.platform }}_${{ matrix.arch }}"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { platform: linux, arch: amd64, runner: ubuntu-latest }
+          - { platform: macos, arch: arm64, runner: macos-latest }
+          - { platform: windows, arch: amd64, runner: windows-latest }
+
+    steps:
+      - name: Free disk space
+        if: runner.os != 'Windows'
+        run: sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          cache: true
+          components: clippy
+
+      - name: Prepare build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./ci/scripts/pre-build.sh test ${{ matrix.platform }} ${{ matrix.arch }}
+          source .env.build
+          echo "PROTOC=$PROTOC" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: |
+          source .env.ci
+          cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --no-deps -- -D warnings
