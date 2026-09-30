@@ -81,9 +81,9 @@ jobs:
           key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-4
 
       - name: Install vcpkg dependencies
-        run: ./vcpkg/vcpkg install abseil geos openssl pkgconf s2geometry
+        run: ./vcpkg/vcpkg install abseil geos openssl pkgconf proj s2geometry
 
-      - name: Set up static GEOS
+      - name: Bundle PROJ data and set up native dependencies
         env:
           VCPKG_INSTALLED_DIR: ${{ github.workspace }}/vcpkg/installed/${{ matrix.vcpkg_triplet }}
         run: |
@@ -94,6 +94,10 @@ jobs:
           fi
           echo "PKG_CONFIG=$pkg_config" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$VCPKG_INSTALLED_DIR/lib/pkgconfig" >> "$GITHUB_ENV"
+          test -f "$VCPKG_INSTALLED_DIR/share/proj/proj.db"
+          tar -czf "$RUNNER_TEMP/proj-data.tar.gz" \
+            -C "$VCPKG_INSTALLED_DIR/share" proj
+          echo "PROJ_DATA_ARCHIVE=$RUNNER_TEMP/proj-data.tar.gz" >> "$GITHUB_ENV"
 
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
@@ -101,13 +105,13 @@ jobs:
           components: clippy
 
       - name: Build
-        run: cargo build --locked
+        run: cargo build --locked --features bundled-proj-data
 
       - name: Test
         run: |
           source .env.ci
-          cargo test --locked
+          cargo test --locked --features bundled-proj-data
 
       - name: Clippy
         if: matrix.platform == 'linux'
-        run: cargo clippy --locked --no-deps -- -D warnings
+        run: cargo clippy --locked --features bundled-proj-data --no-deps -- -D warnings
