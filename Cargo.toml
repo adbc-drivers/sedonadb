@@ -1,43 +1,43 @@
-[workspace]
-members = ["."]
-resolver = "2"
-
-[workspace.package]
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
-license = "Apache-2.0"
-repository = "https://github.com/adbc-drivers/sedonadb"
-
-[workspace.dependencies]
-adbc_core = "0.23.0"
-adbc_ffi = "0.23.0"
-adbc-driver-datafusion = { git = "https://github.com/adbc-drivers/datafusion.git", rev = "818eaaf791f68e9224dc6cd91f7ed0cfc08f4102", default-features = false }
-sedona = { git = "https://github.com/apache/sedona-db.git", rev = "84d9b7bea8e9449e81358dd5669b8942c2c75779", default-features = false }
-tokio = { version = "1.49", features = ["rt-multi-thread"] }
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 [package]
-name = "adbc-driver-sedonadb"
+name = "sedona-adbc"
+version = "0.5.0"
+license = "Apache-2.0"
+keywords = ["geospatial", "gis", "spatial", "datafusion", "arrow"]
+categories = ["science::geo", "database"]
+homepage = "https://github.com/apache/sedona-db"
+repository = "https://github.com/adbc-drivers/sedonadb"
 description = "ADBC driver for Apache SedonaDB"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+readme = "README.md"
+edition = "2024"
+rust-version = "1.88.0"
+
+[lints.clippy]
+result_large_err = "allow"
 
 [dependencies]
-adbc_core.workspace = true
-adbc_ffi = { workspace = true, optional = true }
-adbc-driver-datafusion.workspace = true
-sedona.workspace = true
-tokio.workspace = true
-
-[features]
-default = ["ffi"]
-ffi = ["dep:adbc_ffi"]
-
-[lib]
-crate-type = ["lib", "cdylib"]
-
-[lints.rust]
-linker_messages = "allow"
+adbc_core = ">=0.24.0"
+adbc_ffi = ">=0.24.0"
+arrow-array = "58.3.0"
+arrow-schema = "58.3.0"
+datafusion = { version = "54.1.0", default-features = false }
+futures = "0.3"
+sedona = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac" }
+sedona-extension = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac" }
+tokio = { version = "1.52", features = ["rt-multi-thread"] }

@@ -14,13 +14,32 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-mod utils;
+use adbc_core::{
+    Driver, Optionable,
+    error::Result,
+    options::{OptionDatabase, OptionValue},
+};
 
-pub mod connection;
-pub mod database;
-pub mod driver;
-pub mod statement;
+use crate::database::SedonaDatabase;
 
-use driver::SedonaDriver;
+#[derive(Default)]
+pub struct SedonaDriver {}
 
-adbc_ffi::export_driver!(AdbcSedonadbDriverInit, SedonaDriver);
+impl Driver for SedonaDriver {
+    type DatabaseType = SedonaDatabase;
+
+    fn new_database(&mut self) -> Result<Self::DatabaseType> {
+        Ok(Self::DatabaseType {})
+    }
+
+    fn new_database_with_opts(
+        &mut self,
+        opts: impl IntoIterator<Item = (OptionDatabase, OptionValue)>,
+    ) -> Result<Self::DatabaseType> {
+        let mut database = Self::DatabaseType {};
+        for (key, value) in opts {
+            database.set_option(key, value)?;
+        }
+        Ok(database)
+    }
+}
