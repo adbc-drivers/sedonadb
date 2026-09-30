@@ -4,10 +4,6 @@ This repository contains the standalone version of Apache SedonaDB's
 `sedona-adbc` crate. It implements the ADBC driver, database, connection, and
 statement interfaces directly on top of a Sedona context.
 
-The SedonaDB dependencies are pinned to the Apache SedonaDB revision from which
-this crate was copied:
-
-- Apache SedonaDB: `242e4ffe329c36dead87f163331d3041409e7aac`
 
 ## Development
 
@@ -39,3 +35,11 @@ The driver supports the standard ADBC `adbc.connection.autocommit`,
 `adbc.connection.catalog`, and `adbc.connection.db_schema` options. Catalog and
 schema values must already exist. They are applied directly to DataFusion's
 session configuration without executing SQL.
+
+## Statement options
+
+Statements track the standard ADBC bulk-ingestion options
+`adbc.ingest.target_table`, `adbc.ingest.target_catalog`,
+`adbc.ingest.target_db_schema`, and `adbc.ingest.mode`. The
+`adbc.ingest.temporary` option accepts `false`; temporary ingestion is not yet
+supported.
