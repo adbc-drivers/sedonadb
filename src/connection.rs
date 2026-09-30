@@ -1,0 +1,233 @@
+// Copyright (c) 2026 ADBC Drivers Contributors
+// Licensed under the Apache License, Version 2.0.
+
+// Because a number of methods only return Err() for not implemented,
+// the compiler doesn't know how to guess which impl RecordBatchReader
+// will be returned. When we implement the methods, we can remove this.
+#![allow(refining_impl_trait)]
+
+use adbc_core::{
+    Connection,
+    options::{InfoCode, ObjectDepth},
+};
+use arrow_array::RecordBatchReader;
+use sedona::context::SedonaContext;
+use sedona_extension::runtime::RuntimeHandle;
+use std::sync::Arc;
+
+use adbc_core::{
+    Optionable,
+    error::{Error, Result, Status},
+    options::{OptionConnection, OptionValue},
+};
+
+use crate::{
+    err_not_implemented, err_unrecognized_option, statement::SedonaStatement,
+    utils::OptionValueExt, utils::from_datafusion_error,
+};
+
+pub struct SedonaConnection {
+    runtime: Arc<RuntimeHandle>,
+    ctx: Arc<SedonaContext>,
+    autocommit_on: bool,
+}
+
+impl SedonaConnection {
+    pub(crate) fn try_new(
+        opts: impl IntoIterator<Item = (OptionConnection, OptionValue)>,
+    ) -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                Error::with_message_and_status(
+                    format!("Failed to build multithreaded runtime: {e}"),
+                    Status::Internal,
+                )
+            })?;
+
+        let ctx = runtime.block_on(async {
+            SedonaContext::new_local_interactive()
+                .await
+                .map_err(from_datafusion_error)
+        })?;
+
+        let mut connection = Self {
+            runtime: Arc::new(RuntimeHandle::new(runtime)),
+            ctx: Arc::new(ctx),
+            autocommit_on: true,
+        };
+
+        for (key, value) in opts {
+            connection.set_option(key, value)?;
+        }
+
+        Ok(connection)
+    }
+}
+
+impl Optionable for SedonaConnection {
+    type Option = OptionConnection;
+
+    fn set_option(&mut self, key: Self::Option, value: OptionValue) -> Result<()> {
+        match &key {
+            OptionConnection::AutoCommit => {
+                self.autocommit_on = value.as_bool()?;
+                Ok(())
+            }
+            _ => err_unrecognized_option!(key),
+        }
+    }
+
+    fn get_option_string(&self, key: Self::Option) -> Result<String> {
+        match &key {
+            OptionConnection::AutoCommit => Ok(if self.autocommit_on {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }),
+            _ => err_unrecognized_option!(key),
+        }
+    }
+
+    fn get_option_bytes(&self, key: Self::Option) -> Result<Vec<u8>> {
+        err_unrecognized_option!(key)
+    }
+
+    fn get_option_int(&self, key: Self::Option) -> Result<i64> {
+        err_unrecognized_option!(key)
+    }
+
+    fn get_option_double(&self, key: Self::Option) -> Result<f64> {
+        err_unrecognized_option!(key)
+    }
+}
+
+impl Connection for SedonaConnection {
+    type StatementType = SedonaStatement;
+
+    fn new_statement(&mut self) -> Result<SedonaStatement> {
+        Ok(SedonaStatement::new(self.runtime.clone(), self.ctx.clone()))
+    }
+
+    fn cancel(&mut self) -> Result<()> {
+        err_not_implemented!()
+    }
+
+    fn get_info(
+        &self,
+        _codes: Option<std::collections::HashSet<InfoCode>>,
+    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
+        err_not_implemented!()
+    }
+
+    fn get_objects(
+        &self,
+        _depth: ObjectDepth,
+        _catalog: Option<&str>,
+        _db_schema: Option<&str>,
+        _table_name: Option<&str>,
+        _table_type: Option<Vec<&str>>,
+        _column_name: Option<&str>,
+    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
+        err_not_implemented!()
+    }
+
+    fn get_table_schema(
+        &self,
+        _catalog: Option<&str>,
+        _db_schema: Option<&str>,
+        _table_name: &str,
+    ) -> Result<arrow_schema::Schema> {
+        err_not_implemented!()
+    }
+
+    fn get_table_types(&self) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
+        err_not_implemented!()
+    }
+
+    fn get_statistic_names(&self) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
+        err_not_implemented!()
+    }
+
+    fn get_statistics(
+        &self,
+        _catalog: Option<&str>,
+        _db_schema: Option<&str>,
+        _table_name: Option<&str>,
+        _approximate: bool,
+    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
+        err_not_implemented!()
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        err_not_implemented!()
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        err_not_implemented!()
+    }
+
+    fn read_partition(
+        &self,
+        _partition: impl AsRef<[u8]>,
+    ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
+        err_not_implemented!()
+    }
+}
+
+#[cfg(test)]
+mod test {
+
+    use adbc_core::{Database, Driver};
+
+    use crate::driver::SedonaDriver;
+
+    use super::*;
+
+    #[test]
+    fn autocommit() {
+        let mut connection = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap();
+
+        // Turn autocommit on
+        connection
+            .set_option(
+                OptionConnection::AutoCommit,
+                OptionValue::String("true".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::AutoCommit)
+                .unwrap(),
+            "true"
+        );
+
+        // Turn autocommit off
+        connection
+            .set_option(
+                OptionConnection::AutoCommit,
+                OptionValue::String("false".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::AutoCommit)
+                .unwrap(),
+            "false"
+        );
+
+        // Try to set autocommit with an in appropriate value
+        let err = connection
+            .set_option(OptionConnection::AutoCommit, OptionValue::Bytes(vec![]))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "InvalidArguments: Expected boolean option (sqlstate: 00000, vendor_code: 0)"
+        );
+    }
+}
