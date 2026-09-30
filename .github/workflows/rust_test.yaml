@@ -56,6 +56,8 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-bincache
           VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+          VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_triplet }}
+          VCPKG_MANIFEST_MODE: "OFF"
           CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
@@ -67,6 +69,8 @@ jobs:
           echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
           echo "VCPKG_DEFAULT_BINARY_CACHE=$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_ENV"
           echo "VCPKG_DEFAULT_TRIPLET=$VCPKG_DEFAULT_TRIPLET" >> "$GITHUB_ENV"
+          echo "VCPKG_TARGET_TRIPLET=$VCPKG_TARGET_TRIPLET" >> "$GITHUB_ENV"
+          echo "VCPKG_MANIFEST_MODE=$VCPKG_MANIFEST_MODE" >> "$GITHUB_ENV"
           echo "PATH=$VCPKG_ROOT:$PATH" >> "$GITHUB_ENV"
           echo "CMAKE_TOOLCHAIN_FILE=$CMAKE_TOOLCHAIN_FILE" >> "$GITHUB_ENV"
 
@@ -74,10 +78,10 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: vcpkg-bincache
-          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-3
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ env.VCPKG_REF }}-4
 
       - name: Install vcpkg dependencies
-        run: ./vcpkg/vcpkg install abseil geos openssl pkgconf
+        run: ./vcpkg/vcpkg install abseil geos openssl pkgconf s2geometry
 
       - name: Set up static GEOS
         env:
