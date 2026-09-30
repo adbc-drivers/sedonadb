@@ -32,3 +32,10 @@ by all connections created from it:
 | `unspillable_reserve_ratio` | Number from `0.0` to `1.0` | `0.2` |
 
 Runtime options cannot be changed after database initialization.
+
+## Connection options
+
+The driver supports the standard ADBC `adbc.connection.autocommit`,
+`adbc.connection.catalog`, and `adbc.connection.db_schema` options. Catalog and
+schema values must already exist. They are applied directly to DataFusion's
+session configuration without executing SQL.

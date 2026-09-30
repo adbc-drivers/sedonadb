@@ -1,11 +1,6 @@
 // Copyright (c) 2026 ADBC Drivers Contributors
 // Licensed under the Apache License, Version 2.0.
 
-// Because a number of methods only return Err() for not implemented,
-// the compiler doesn't know how to guess which impl RecordBatchReader
-// will be returned. When we implement the methods, we can remove this.
-#![allow(refining_impl_trait)]
-
 use adbc_core::{
     Connection,
     options::{InfoCode, ObjectDepth},
@@ -49,6 +44,43 @@ impl SedonaConnection {
 
         Ok(connection)
     }
+
+    fn set_current_catalog(&self, catalog_name: String) -> Result<()> {
+        let state = self.ctx.ctx.state_ref();
+        let mut state = state.write();
+
+        if state.catalog_list().catalog(&catalog_name).is_none() {
+            return Err(Error::with_message_and_status(
+                format!("Catalog {catalog_name:?} does not exist"),
+                Status::NotFound,
+            ));
+        }
+
+        state.config_mut().options_mut().catalog.default_catalog = catalog_name;
+        Ok(())
+    }
+
+    fn set_current_schema(&self, schema_name: String) -> Result<()> {
+        let state = self.ctx.ctx.state_ref();
+        let mut state = state.write();
+        let catalog_name = state.config_options().catalog.default_catalog.clone();
+        let catalog = state.catalog_list().catalog(&catalog_name).ok_or_else(|| {
+            Error::with_message_and_status(
+                format!("Catalog {catalog_name:?} does not exist"),
+                Status::NotFound,
+            )
+        })?;
+
+        if catalog.schema(&schema_name).is_none() {
+            return Err(Error::with_message_and_status(
+                format!("Schema {schema_name:?} does not exist in catalog {catalog_name:?}"),
+                Status::NotFound,
+            ));
+        }
+
+        state.config_mut().options_mut().catalog.default_schema = schema_name;
+        Ok(())
+    }
 }
 
 impl Optionable for SedonaConnection {
@@ -60,6 +92,14 @@ impl Optionable for SedonaConnection {
                 self.autocommit_on = value.as_bool()?;
                 Ok(())
             }
+            OptionConnection::CurrentCatalog => match value {
+                OptionValue::String(value) => self.set_current_catalog(value),
+                _ => Err(invalid_string_option(&key)),
+            },
+            OptionConnection::CurrentSchema => match value {
+                OptionValue::String(value) => self.set_current_schema(value),
+                _ => Err(invalid_string_option(&key)),
+            },
             _ => err_unrecognized_option!(key),
         }
     }
@@ -71,6 +111,22 @@ impl Optionable for SedonaConnection {
             } else {
                 "false".to_string()
             }),
+            OptionConnection::CurrentCatalog => Ok(self
+                .ctx
+                .ctx
+                .state()
+                .config_options()
+                .catalog
+                .default_catalog
+                .clone()),
+            OptionConnection::CurrentSchema => Ok(self
+                .ctx
+                .ctx
+                .state()
+                .config_options()
+                .catalog
+                .default_schema
+                .clone()),
             _ => err_unrecognized_option!(key),
         }
     }
@@ -86,6 +142,13 @@ impl Optionable for SedonaConnection {
     fn get_option_double(&self, key: Self::Option) -> Result<f64> {
         err_unrecognized_option!(key)
     }
+}
+
+fn invalid_string_option(key: &OptionConnection) -> Error {
+    Error::with_message_and_status(
+        format!("Option {:?} must be a string", key.as_ref()),
+        Status::InvalidArguments,
+    )
 }
 
 impl Connection for SedonaConnection {
@@ -165,6 +228,7 @@ impl Connection for SedonaConnection {
 mod test {
 
     use adbc_core::{Database, Driver};
+    use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
 
     use crate::driver::SedonaDriver;
 
@@ -214,5 +278,80 @@ mod test {
             err.to_string(),
             "InvalidArguments: Expected boolean option (sqlstate: 00000, vendor_code: 0)"
         );
+    }
+
+    #[test]
+    fn current_catalog_and_schema() {
+        let mut connection = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap();
+
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "datafusion"
+        );
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "public"
+        );
+
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        connection.ctx.ctx.register_catalog("secondary", catalog);
+
+        connection
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("secondary"),
+            )
+            .unwrap();
+        connection
+            .set_option(
+                OptionConnection::CurrentSchema,
+                OptionValue::from("analytics"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "secondary"
+        );
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "analytics"
+        );
+
+        let error = connection
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("missing"),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, Status::NotFound);
+
+        let error = connection
+            .set_option(
+                OptionConnection::CurrentSchema,
+                OptionValue::from("missing"),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, Status::NotFound);
+
+        let error = connection
+            .set_option(OptionConnection::CurrentCatalog, OptionValue::from(1_i64))
+            .unwrap_err();
+        assert_eq!(error.status, Status::InvalidArguments);
     }
 }
