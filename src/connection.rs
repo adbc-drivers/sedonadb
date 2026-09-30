@@ -142,40 +142,11 @@ impl SedonaConnection {
     }
 
     fn set_current_catalog(&self, catalog_name: String) -> Result<()> {
-        let state = self.ctx.ctx.state_ref();
-        let mut state = state.write();
-
-        if state.catalog_list().catalog(&catalog_name).is_none() {
-            return Err(Error::with_message_and_status(
-                format!("Catalog {catalog_name:?} does not exist"),
-                Status::NotFound,
-            ));
-        }
-
-        state.config_mut().options_mut().catalog.default_catalog = catalog_name;
-        Ok(())
+        self.set_current_catalog_and_schema(Some(catalog_name), None)
     }
 
     fn set_current_schema(&self, schema_name: String) -> Result<()> {
-        let state = self.ctx.ctx.state_ref();
-        let mut state = state.write();
-        let catalog_name = state.config_options().catalog.default_catalog.clone();
-        let catalog = state.catalog_list().catalog(&catalog_name).ok_or_else(|| {
-            Error::with_message_and_status(
-                format!("Catalog {catalog_name:?} does not exist"),
-                Status::NotFound,
-            )
-        })?;
-
-        if catalog.schema(&schema_name).is_none() {
-            return Err(Error::with_message_and_status(
-                format!("Schema {schema_name:?} does not exist in catalog {catalog_name:?}"),
-                Status::NotFound,
-            ));
-        }
-
-        state.config_mut().options_mut().catalog.default_schema = schema_name;
-        Ok(())
+        self.set_current_catalog_and_schema(None, Some(schema_name))
     }
 }
 
@@ -400,6 +371,9 @@ mod test {
 
         let catalog = Arc::new(MemoryCatalogProvider::new());
         catalog
+            .register_schema("public", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        catalog
             .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
             .unwrap();
         connection.ctx.ctx.register_catalog("secondary", catalog);
@@ -445,6 +419,30 @@ mod test {
             )
             .unwrap_err();
         assert_eq!(error.status, Status::NotFound);
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("other", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        connection.ctx.ctx.register_catalog("incompatible", catalog);
+        let error = connection
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("incompatible"),
+            )
+            .unwrap_err();
+        assert_eq!(error.status, Status::NotFound);
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentCatalog)
+                .unwrap(),
+            "secondary"
+        );
+        assert_eq!(
+            connection
+                .get_option_string(OptionConnection::CurrentSchema)
+                .unwrap(),
+            "analytics"
+        );
 
         let error = connection
             .set_option(OptionConnection::CurrentCatalog, OptionValue::from(1_i64))
@@ -525,6 +523,9 @@ mod test {
         ));
 
         let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("public", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
         catalog
             .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
             .unwrap();
