@@ -16,16 +16,18 @@ use crate::{connection::SedonaConnection, err_unrecognized_option, utils::from_d
 /// Maximum query-execution memory, as bytes or a human-readable size such as `"4gb"`.
 pub const OPTION_MEMORY_LIMIT: &str = "memory_limit";
 /// Directory used for temporary spill files.
-pub const OPTION_TEMP_DIR: &str = "temp_dir";
+pub const OPTION_TEMP_DIRECTORY: &str = "temp_directory";
 /// Memory pool implementation: `"fair"` or `"greedy"`.
 pub const OPTION_MEMORY_POOL_TYPE: &str = "memory_pool_type";
 /// Fraction of a fair memory pool reserved for unspillable consumers.
 pub const OPTION_UNSPILLABLE_RESERVE_RATIO: &str = "unspillable_reserve_ratio";
 
+const SEDONA_OPTION_TEMP_DIR: &str = "temp_dir";
+
 #[derive(Debug)]
 struct DatabaseOptions {
     memory_limit: String,
-    temp_dir: Option<String>,
+    temp_directory: Option<String>,
     memory_pool_type: String,
     unspillable_reserve_ratio: f64,
 }
@@ -34,7 +36,7 @@ impl Default for DatabaseOptions {
     fn default() -> Self {
         Self {
             memory_limit: "unlimited".to_string(),
-            temp_dir: None,
+            temp_directory: None,
             memory_pool_type: "fair".to_string(),
             unspillable_reserve_ratio: 0.2,
         }
@@ -59,8 +61,8 @@ impl DatabaseOptions {
                         }
                     };
                 }
-                OPTION_TEMP_DIR => {
-                    parsed.temp_dir = Some(option_string(&key, value)?);
+                OPTION_TEMP_DIRECTORY => {
+                    parsed.temp_directory = Some(option_string(&key, value)?);
                 }
                 OPTION_MEMORY_POOL_TYPE => {
                     parsed.memory_pool_type = option_string(&key, value)?;
@@ -93,8 +95,8 @@ impl DatabaseOptions {
                 self.unspillable_reserve_ratio.to_string(),
             ),
         ]);
-        if let Some(temp_dir) = &self.temp_dir {
-            opts.insert(OPTION_TEMP_DIR.to_string(), temp_dir.clone());
+        if let Some(temp_directory) = &self.temp_directory {
+            opts.insert(SEDONA_OPTION_TEMP_DIR.to_string(), temp_directory.clone());
         }
         opts
     }
@@ -155,7 +157,7 @@ impl Optionable for SedonaDatabase {
     fn set_option(&mut self, key: Self::Option, _value: OptionValue) -> Result<()> {
         match key.as_ref() {
             OPTION_MEMORY_LIMIT
-            | OPTION_TEMP_DIR
+            | OPTION_TEMP_DIRECTORY
             | OPTION_MEMORY_POOL_TYPE
             | OPTION_UNSPILLABLE_RESERVE_RATIO => Err(Error::with_message_and_status(
                 format!(
@@ -171,9 +173,9 @@ impl Optionable for SedonaDatabase {
     fn get_option_string(&self, key: Self::Option) -> Result<String> {
         match key.as_ref() {
             OPTION_MEMORY_LIMIT => Ok(self.options.memory_limit.clone()),
-            OPTION_TEMP_DIR => self
+            OPTION_TEMP_DIRECTORY => self
                 .options
-                .temp_dir
+                .temp_directory
                 .clone()
                 .ok_or_else(|| invalid_option(&key, "option is not set")),
             OPTION_MEMORY_POOL_TYPE => Ok(self.options.memory_pool_type.clone()),
@@ -233,6 +235,7 @@ mod test {
         let database = SedonaDriver::default()
             .new_database_with_opts([
                 (option(OPTION_MEMORY_LIMIT), OptionValue::from("32mb")),
+                (option(OPTION_TEMP_DIRECTORY), OptionValue::from("/tmp")),
                 (option(OPTION_MEMORY_POOL_TYPE), OptionValue::from("greedy")),
                 (
                     option(OPTION_UNSPILLABLE_RESERVE_RATIO),
@@ -245,6 +248,13 @@ mod test {
             database.ctx.ctx.runtime_env().memory_pool.memory_limit(),
             MemoryLimit::Finite(limit) if limit == 32 * 1024 * 1024
         ));
+        assert_eq!(
+            database
+                .options
+                .runtime_options()
+                .get(SEDONA_OPTION_TEMP_DIR),
+            Some(&"/tmp".to_string())
+        );
     }
 
     #[test]

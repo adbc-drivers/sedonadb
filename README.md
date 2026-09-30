@@ -27,7 +27,7 @@ by all connections created from it:
 | Option | Value | Default |
 | --- | --- | --- |
 | `memory_limit` | Bytes or a size such as `4gb`; `unlimited` disables the limit | `unlimited` |
-| `temp_dir` | Directory for temporary spill files | DataFusion default |
+| `temp_directory` | Directory for temporary spill files | DataFusion default |
 | `memory_pool_type` | `fair` or `greedy` | `fair` |
 | `unspillable_reserve_ratio` | Number from `0.0` to `1.0` | `0.2` |
 
