@@ -109,4 +109,5 @@ jobs:
           cargo test --locked
 
       - name: Clippy
+        if: matrix.platform == 'linux'
         run: cargo clippy --locked --no-deps -- -D warnings
