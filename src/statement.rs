@@ -218,7 +218,7 @@ mod test {
         error::Status,
         options::{IngestMode, OptionStatement, OptionValue},
     };
-    use arrow_array::RecordBatch;
+    use arrow_array::{Float64Array, RecordBatch};
     use arrow_schema::{Field, Schema};
     use datafusion::assert_batches_eq;
 
@@ -263,6 +263,41 @@ mod test {
             ],
             batches.unwrap().deref()
         );
+    }
+
+    #[test]
+    fn transforms_crs84_to_crs27() {
+        let mut statement = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap()
+            .new_statement()
+            .unwrap();
+
+        statement
+            .set_sql_query(
+                "SELECT ST_X(transformed) AS longitude, ST_Y(transformed) AS latitude \
+                 FROM (SELECT ST_Transform(ST_Point(-100, 40), \
+                     'OGC:CRS84', 'OGC:CRS27') AS transformed)",
+            )
+            .unwrap();
+
+        let batches: Vec<RecordBatch> = statement
+            .execute()
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+
+        let longitude = batches[0].column(0);
+        let longitude = longitude.as_any().downcast_ref::<Float64Array>().unwrap();
+        let latitude = batches[0].column(1);
+        let latitude = latitude.as_any().downcast_ref::<Float64Array>().unwrap();
+
+        assert!((longitude.value(0) - -99.999_584_426_821).abs() < 1e-7);
+        assert!((latitude.value(0) - 40.000_003_116_098).abs() < 1e-7);
     }
 
     #[test]
