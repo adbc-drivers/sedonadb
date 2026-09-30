@@ -18,3 +18,17 @@ cargo clippy --locked --no-deps -- -D warnings
 ```
 
 The crate exports `AdbcSedonadbDriverInit` through `adbc_ffi`.
+
+## Database options
+
+The following options are applied when the database is initialized and shared
+by all connections created from it:
+
+| Option | Value | Default |
+| --- | --- | --- |
+| `memory_limit` | Bytes or a size such as `4gb`; `unlimited` disables the limit | `unlimited` |
+| `temp_dir` | Directory for temporary spill files | DataFusion default |
+| `memory_pool_type` | `fair` or `greedy` | `fair` |
+| `unspillable_reserve_ratio` | Number from `0.0` to `1.0` | `0.2` |
+
+Runtime options cannot be changed after database initialization.

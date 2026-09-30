@@ -22,8 +22,7 @@ use adbc_core::{
 };
 
 use crate::{
-    err_not_implemented, err_unrecognized_option, statement::SedonaStatement,
-    utils::OptionValueExt, utils::from_datafusion_error,
+    err_not_implemented, err_unrecognized_option, statement::SedonaStatement, utils::OptionValueExt,
 };
 
 pub struct SedonaConnection {
@@ -33,28 +32,14 @@ pub struct SedonaConnection {
 }
 
 impl SedonaConnection {
-    pub(crate) fn try_new(
+    pub(crate) fn new(
+        runtime: Arc<RuntimeHandle>,
+        ctx: Arc<SedonaContext>,
         opts: impl IntoIterator<Item = (OptionConnection, OptionValue)>,
     ) -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                Error::with_message_and_status(
-                    format!("Failed to build multithreaded runtime: {e}"),
-                    Status::Internal,
-                )
-            })?;
-
-        let ctx = runtime.block_on(async {
-            SedonaContext::new_local_interactive()
-                .await
-                .map_err(from_datafusion_error)
-        })?;
-
         let mut connection = Self {
-            runtime: Arc::new(RuntimeHandle::new(runtime)),
-            ctx: Arc::new(ctx),
+            runtime,
+            ctx,
             autocommit_on: true,
         };
 
