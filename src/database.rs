@@ -134,6 +134,9 @@ impl SedonaDatabase {
     pub(crate) fn try_new(
         opts: impl IntoIterator<Item = (OptionDatabase, OptionValue)>,
     ) -> Result<Self> {
+        #[cfg(feature = "bundled-proj-data")]
+        crate::bundled_proj::configure()?;
+
         let options = DatabaseOptions::parse(opts)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
