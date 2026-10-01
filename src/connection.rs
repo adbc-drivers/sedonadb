@@ -5,6 +5,7 @@ use adbc_core::{
     Connection,
     options::{InfoCode, ObjectDepth},
 };
+use adbc_core_0_23::options::InfoCode as DriverbaseInfoCode;
 use arrow_array::RecordBatchReader;
 use datafusion::{
     catalog::{CatalogProvider, CatalogProviderList, MemoryCatalogProviderList},
@@ -231,9 +232,16 @@ impl Connection for SedonaConnection {
 
     fn get_info(
         &self,
-        _codes: Option<std::collections::HashSet<InfoCode>>,
+        codes: Option<std::collections::HashSet<InfoCode>>,
     ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
-        err_not_implemented!()
+        let codes = codes.map(|codes| {
+            codes
+                .into_iter()
+                .filter_map(|code| DriverbaseInfoCode::try_from(u32::from(&code)).ok())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        let info = get_info_codes();
+        Ok(Box::new(info.get_info(codes).build()))
     }
 
     fn get_objects(
@@ -291,10 +299,40 @@ impl Connection for SedonaConnection {
     }
 }
 
+static INFO_CODES: std::sync::OnceLock<driverbase::InfoRegistry> = std::sync::OnceLock::new();
+
+fn get_info_codes() -> &'static driverbase::InfoRegistry {
+    INFO_CODES.get_or_init(|| {
+        let mut registry = driverbase::InfoRegistry::new();
+        registry.add_string(
+            DriverbaseInfoCode::DriverName,
+            "ADBC Driver Foundry Driver for Apache SedonaDB",
+        );
+        registry.add_string(
+            DriverbaseInfoCode::DriverVersion,
+            concat!("v", env!("CARGO_PKG_VERSION")),
+        );
+        registry.add_string(DriverbaseInfoCode::VendorName, "Apache SedonaDB");
+        registry.add_string(DriverbaseInfoCode::VendorVersion, "0.5.0");
+        registry.add_string(
+            DriverbaseInfoCode::VendorArrowVersion,
+            format!("arrow-rs v{}", datafusion::arrow::ARROW_VERSION),
+        );
+        registry.add_string(
+            DriverbaseInfoCode::DriverArrowVersion,
+            format!("arrow-rs v{}", datafusion::arrow::ARROW_VERSION),
+        );
+        registry
+    })
+}
+
 #[cfg(test)]
 mod test {
 
+    use std::collections::{HashMap, HashSet};
+
     use adbc_core::{Database, Driver, Statement};
+    use arrow_array::{StringArray, UInt32Array, UnionArray};
     use datafusion::assert_batches_eq;
     use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
 
@@ -584,6 +622,77 @@ mod test {
                 "+-------+",
             ],
             &batches
+        );
+    }
+
+    fn get_info_values(codes: Option<HashSet<InfoCode>>) -> HashMap<u32, String> {
+        let connection = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap();
+        let batches = connection
+            .get_info(codes)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+
+        let batch = &batches[0];
+        let names = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UnionArray>()
+            .unwrap();
+
+        (0..batch.num_rows())
+            .map(|index| {
+                assert_eq!(values.type_id(index), 0);
+                let value = values.value(index);
+                let value = value.as_any().downcast_ref::<StringArray>().unwrap();
+                (names.value(index), value.value(0).to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn get_info() {
+        let values = get_info_values(None);
+        assert_eq!(values.len(), 6);
+        assert_eq!(
+            values[&u32::from(&InfoCode::DriverName)],
+            "ADBC Driver Foundry Driver for Apache SedonaDB"
+        );
+        assert_eq!(
+            values[&u32::from(&InfoCode::DriverVersion)],
+            concat!("v", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(values[&u32::from(&InfoCode::VendorName)], "Apache SedonaDB");
+        assert_eq!(values[&u32::from(&InfoCode::VendorVersion)], "0.5.0");
+        assert_eq!(
+            values[&u32::from(&InfoCode::VendorArrowVersion)],
+            format!("arrow-rs v{}", datafusion::arrow::ARROW_VERSION)
+        );
+        assert_eq!(
+            values[&u32::from(&InfoCode::DriverArrowVersion)],
+            format!("arrow-rs v{}", datafusion::arrow::ARROW_VERSION)
+        );
+
+        let values = get_info_values(Some(HashSet::from([
+            InfoCode::VendorName,
+            InfoCode::Other(42),
+        ])));
+        assert_eq!(
+            values,
+            HashMap::from([(
+                u32::from(&InfoCode::VendorName),
+                "Apache SedonaDB".to_string()
+            )])
         );
     }
 }
