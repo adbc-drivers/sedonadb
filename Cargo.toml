@@ -23,10 +23,12 @@ repository.workspace = true
 
 [dependencies]
 adbc_core = ">=0.24.0"
+adbc_core_0_23 = { package = "adbc_core", version = "0.23.0" }
 adbc_ffi = { version = ">=0.24.0", optional = true }
 arrow-array = "58.3.0"
 arrow-schema = "58.3.0"
 datafusion = { version = "54.1.0", default-features = false }
+driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git", rev = "9749d0a3d71c71b77e6d79a8a946434a8cd9d3c2" }
 futures = "0.3"
 flate2 = { version = "1", optional = true }
 sedona = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac", features = ["proj", "s2geography"] }
