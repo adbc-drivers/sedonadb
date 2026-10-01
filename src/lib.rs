@@ -3,6 +3,9 @@
 
 mod utils;
 
+#[cfg(feature = "bundled-proj-data")]
+mod bundled_proj;
+
 pub mod connection;
 pub mod database;
 pub mod driver;

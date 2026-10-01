@@ -30,12 +30,17 @@ arrow-schema = "58.3.0"
 datafusion = { version = "54.1.0", default-features = false }
 driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git", rev = "9749d0a3d71c71b77e6d79a8a946434a8cd9d3c2" }
 futures = "0.3"
-sedona = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac", features = ["s2geography"] }
+flate2 = { version = "1", optional = true }
+sedona = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac", features = ["proj", "s2geography"] }
 sedona-extension = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac" }
+sedona-proj = { git = "https://github.com/apache/sedona-db.git", rev = "242e4ffe329c36dead87f163331d3041409e7aac", default-features = false }
+tar = { version = "0.4", optional = true }
+tempfile = { version = "3", optional = true }
 tokio = { version = "1.52", features = ["rt-multi-thread"] }
 
 [features]
 default = ["ffi"]
+bundled-proj-data = ["dep:flate2", "dep:tar", "dep:tempfile"]
 ffi = ["dep:adbc_ffi"]
 
 [lib]
