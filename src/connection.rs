@@ -258,11 +258,41 @@ impl Connection for SedonaConnection {
 
     fn get_table_schema(
         &self,
-        _catalog: Option<&str>,
-        _db_schema: Option<&str>,
-        _table_name: &str,
+        catalog: Option<&str>,
+        db_schema: Option<&str>,
+        table_name: &str,
     ) -> Result<arrow_schema::Schema> {
-        err_not_implemented!()
+        let state = self.ctx.ctx.state();
+        let catalog_name = catalog.unwrap_or(&state.config_options().catalog.default_catalog);
+        let db_schema_name = db_schema.unwrap_or(&state.config_options().catalog.default_schema);
+
+        let catalog = state.catalog_list().catalog(catalog_name).ok_or_else(|| {
+            Error::with_message_and_status(
+                format!("Catalog {catalog_name:?} does not exist"),
+                Status::NotFound,
+            )
+        })?;
+        let db_schema = catalog.schema(db_schema_name).ok_or_else(|| {
+            Error::with_message_and_status(
+                format!("Schema {db_schema_name:?} does not exist in catalog {catalog_name:?}"),
+                Status::NotFound,
+            )
+        })?;
+        let table = self
+            .runtime
+            .block_on(db_schema.table(table_name))
+            .map_err(from_datafusion_error)?
+            .ok_or_else(|| {
+                Error::with_message_and_status(
+                    format!(
+                        "Table {table_name:?} does not exist in schema {db_schema_name:?} \
+                         of catalog {catalog_name:?}"
+                    ),
+                    Status::NotFound,
+                )
+            })?;
+
+        Ok(table.schema().as_ref().clone())
     }
 
     fn get_table_types(&self) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
@@ -623,6 +653,82 @@ mod test {
             ],
             &batches
         );
+    }
+
+    #[test]
+    fn get_table_schema() {
+        let mut connection = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap();
+
+        let mut create = connection.new_statement().unwrap();
+        create
+            .set_sql_query("CREATE TABLE default_table AS SELECT 1 AS value")
+            .unwrap();
+        create
+            .execute()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("public", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        catalog
+            .register_schema("analytics", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        connection.ctx.ctx.register_catalog("secondary", catalog);
+        connection
+            .set_option(
+                OptionConnection::CurrentCatalog,
+                OptionValue::from("secondary"),
+            )
+            .unwrap();
+        connection
+            .set_option(
+                OptionConnection::CurrentSchema,
+                OptionValue::from("analytics"),
+            )
+            .unwrap();
+
+        let mut create = connection.new_statement().unwrap();
+        create
+            .set_sql_query("CREATE TABLE current_table AS SELECT 'value' AS label")
+            .unwrap();
+        create
+            .execute()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        let schema = connection
+            .get_table_schema(None, None, "current_table")
+            .unwrap();
+        assert_eq!(schema.field(0).name(), "label");
+        assert_eq!(schema.field(0).data_type(), &arrow_schema::DataType::Utf8);
+
+        let schema = connection
+            .get_table_schema(Some("datafusion"), Some("public"), "default_table")
+            .unwrap();
+        assert_eq!(schema.field(0).name(), "value");
+        assert_eq!(schema.field(0).data_type(), &arrow_schema::DataType::Int64);
+
+        for error in [
+            connection
+                .get_table_schema(Some("missing"), Some("public"), "default_table")
+                .unwrap_err(),
+            connection
+                .get_table_schema(Some("datafusion"), Some("missing"), "default_table")
+                .unwrap_err(),
+            connection
+                .get_table_schema(Some("datafusion"), Some("public"), "missing")
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.status, Status::NotFound);
+        }
     }
 
     fn get_info_values(codes: Option<HashSet<InfoCode>>) -> HashMap<u32, String> {
