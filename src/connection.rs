@@ -10,6 +10,11 @@ use arrow_array::RecordBatchReader;
 use datafusion::{
     catalog::{CatalogProvider, CatalogProviderList, MemoryCatalogProviderList},
     execution::runtime_env::RuntimeEnv,
+    logical_expr::TableType,
+};
+use driverbase::{
+    error::ErrorHelper as _,
+    get_objects::{ColumnInfo, GetObjectsImpl, TableAndColumnInfo, TableInfo},
 };
 use sedona::context::SedonaContext;
 use sedona_extension::runtime::RuntimeHandle;
@@ -60,6 +65,194 @@ pub struct SedonaConnection {
     runtime: Arc<RuntimeHandle>,
     ctx: Arc<SedonaContext>,
     autocommit_on: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MetadataErrorHelper;
+
+impl driverbase::error::ErrorHelper for MetadataErrorHelper {
+    const NAME: &'static str = "sedonadb";
+}
+
+type MetadataError = driverbase::error::Error<MetadataErrorHelper>;
+
+#[derive(Clone)]
+struct SedonaGetObjects {
+    runtime: Arc<RuntimeHandle>,
+    ctx: Arc<SedonaContext>,
+}
+
+impl SedonaGetObjects {
+    fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>> {
+        self.ctx.ctx.state().catalog_list().catalog(name)
+    }
+
+    fn schema(
+        &self,
+        catalog: &str,
+        db_schema: &str,
+    ) -> Option<Arc<dyn datafusion::catalog::SchemaProvider>> {
+        self.catalog(catalog)?.schema(db_schema)
+    }
+
+    fn table_type_name(table_type: TableType) -> &'static str {
+        match table_type {
+            TableType::Base => "BASE TABLE",
+            TableType::View => "VIEW",
+            TableType::Temporary => "LOCAL TEMPORARY",
+        }
+    }
+
+    fn metadata_error(error: datafusion::error::DataFusionError) -> MetadataError {
+        MetadataErrorHelper::internal_no_location().message(error.to_string())
+    }
+}
+
+impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
+    fn get_catalogs(
+        &self,
+        filter: Option<&str>,
+    ) -> std::result::Result<Vec<String>, MetadataError> {
+        let state = self.ctx.ctx.state();
+        let mut names = state.catalog_list().catalog_names();
+        names.sort();
+        names.retain(|name| filter.is_none_or(|pattern| like_matches(name, pattern)));
+        Ok(names)
+    }
+
+    fn get_db_schemas(
+        &self,
+        catalog: &str,
+        filter: Option<&str>,
+    ) -> std::result::Result<Vec<String>, MetadataError> {
+        let Some(catalog) = self.catalog(catalog) else {
+            return Ok(Vec::new());
+        };
+        let mut names = catalog.schema_names();
+        names.sort();
+        names.retain(|name| filter.is_none_or(|pattern| like_matches(name, pattern)));
+        Ok(names)
+    }
+
+    fn get_tables(
+        &self,
+        catalog: &str,
+        db_schema: &str,
+        table_filter: Option<&str>,
+        table_type_filter: Option<&[String]>,
+    ) -> std::result::Result<Vec<TableInfo>, MetadataError> {
+        let Some(schema) = self.schema(catalog, db_schema) else {
+            return Ok(Vec::new());
+        };
+        let mut names = schema.table_names();
+        names.sort();
+        names.retain(|name| table_filter.is_none_or(|pattern| like_matches(name, pattern)));
+
+        let mut tables = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(table_type) = self
+                .runtime
+                .block_on(schema.table_type(&name))
+                .map_err(Self::metadata_error)?
+            else {
+                continue;
+            };
+            let table_type = Self::table_type_name(table_type);
+            if table_type_filter.is_none_or(|types| types.iter().any(|value| value == table_type)) {
+                tables.push(TableInfo {
+                    table_name: name,
+                    table_type: table_type.to_string(),
+                });
+            }
+        }
+        Ok(tables)
+    }
+
+    fn get_columns(
+        &self,
+        catalog: &str,
+        db_schema: &str,
+        table_filter: Option<&str>,
+        table_type_filter: Option<&[String]>,
+        column_filter: Option<&str>,
+    ) -> std::result::Result<Vec<TableAndColumnInfo>, MetadataError> {
+        let Some(schema) = self.schema(catalog, db_schema) else {
+            return Ok(Vec::new());
+        };
+        let tables = self.get_tables(catalog, db_schema, table_filter, table_type_filter)?;
+        let mut result = Vec::with_capacity(tables.len());
+        for table in tables {
+            let Some(provider) = self
+                .runtime
+                .block_on(schema.table(&table.table_name))
+                .map_err(Self::metadata_error)?
+            else {
+                continue;
+            };
+            let columns = provider
+                .schema()
+                .fields()
+                .iter()
+                .filter(|field| {
+                    column_filter.is_none_or(|pattern| like_matches(field.name(), pattern))
+                })
+                .map(|field| ColumnInfo {
+                    column_name: field.name().clone(),
+                })
+                .collect::<Vec<_>>();
+            if column_filter.is_none() || !columns.is_empty() {
+                result.push(TableAndColumnInfo { table, columns });
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// Match the SQL LIKE wildcards accepted by ADBC metadata filters.
+fn like_matches(value: &str, pattern: &str) -> bool {
+    #[derive(Clone, Copy)]
+    enum Token {
+        Any,
+        One,
+        Literal(char),
+    }
+
+    let mut tokens = Vec::new();
+    let mut pattern_chars = pattern.chars();
+    while let Some(character) = pattern_chars.next() {
+        tokens.push(match character {
+            '%' => Token::Any,
+            '_' => Token::One,
+            '\\' => Token::Literal(pattern_chars.next().unwrap_or('\\')),
+            literal => Token::Literal(literal),
+        });
+    }
+
+    let value = value.chars().collect::<Vec<_>>();
+    let mut matches = vec![false; value.len() + 1];
+    matches[0] = true;
+    for token in tokens {
+        let mut next = vec![false; value.len() + 1];
+        match token {
+            Token::Any => {
+                let mut matched = false;
+                for index in 0..=value.len() {
+                    matched |= matches[index];
+                    next[index] = matched;
+                }
+            }
+            Token::One => {
+                next[1..(value.len() + 1)].copy_from_slice(&matches[..value.len()]);
+            }
+            Token::Literal(expected) => {
+                for index in 1..=value.len() {
+                    next[index] = matches[index - 1] && value[index - 1] == expected;
+                }
+            }
+        }
+        matches = next;
+    }
+    matches[value.len()]
 }
 
 impl SedonaConnection {
@@ -246,14 +439,31 @@ impl Connection for SedonaConnection {
 
     fn get_objects(
         &self,
-        _depth: ObjectDepth,
-        _catalog: Option<&str>,
-        _db_schema: Option<&str>,
-        _table_name: Option<&str>,
-        _table_type: Option<Vec<&str>>,
-        _column_name: Option<&str>,
+        depth: ObjectDepth,
+        catalog: Option<&str>,
+        db_schema: Option<&str>,
+        table_name: Option<&str>,
+        table_type: Option<Vec<&str>>,
+        column_name: Option<&str>,
     ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
-        err_not_implemented!()
+        Ok(driverbase::get_objects::get_objects(
+            SedonaGetObjects {
+                runtime: self.runtime.clone(),
+                ctx: self.ctx.clone(),
+            },
+            match depth {
+                ObjectDepth::All => adbc_core_0_23::options::ObjectDepth::All,
+                ObjectDepth::Catalogs => adbc_core_0_23::options::ObjectDepth::Catalogs,
+                ObjectDepth::Schemas => adbc_core_0_23::options::ObjectDepth::Schemas,
+                ObjectDepth::Tables => adbc_core_0_23::options::ObjectDepth::Tables,
+                ObjectDepth::Columns => adbc_core_0_23::options::ObjectDepth::Columns,
+            },
+            catalog,
+            db_schema,
+            table_name,
+            table_type,
+            column_name,
+        ))
     }
 
     fn get_table_schema(
@@ -729,6 +939,88 @@ mod test {
         ] {
             assert_eq!(error.status, Status::NotFound);
         }
+    }
+
+    #[test]
+    fn get_objects() {
+        let mut connection = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap();
+
+        let mut create = connection.new_statement().unwrap();
+        create
+            .set_sql_query(
+                "CREATE TABLE cities AS SELECT \
+                 'Winnipeg' AS city_name, 749607 AS population",
+            )
+            .unwrap();
+        create
+            .execute()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        let objects = SedonaGetObjects {
+            runtime: connection.runtime.clone(),
+            ctx: connection.ctx.clone(),
+        };
+        assert_eq!(objects.get_catalogs(Some("data%")).unwrap(), ["datafusion"]);
+        assert_eq!(
+            objects
+                .get_db_schemas("datafusion", Some("pub_ic"))
+                .unwrap(),
+            ["public"]
+        );
+        let tables = objects
+            .get_tables("datafusion", "public", Some("cit%"), None)
+            .unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].table_name, "cities");
+        assert_eq!(tables[0].table_type, "BASE TABLE");
+        assert!(
+            objects
+                .get_tables("datafusion", "public", None, Some(&["VIEW".to_string()]),)
+                .unwrap()
+                .is_empty()
+        );
+
+        let tables = objects
+            .get_columns("datafusion", "public", None, None, Some("%name"))
+            .unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].table.table_name, "cities");
+        assert_eq!(tables[0].columns[0].column_name, "city_name");
+
+        let batches = connection
+            .get_objects(
+                ObjectDepth::All,
+                Some("datafusion"),
+                Some("public"),
+                Some("cities"),
+                Some(vec!["BASE TABLE"]),
+                Some("population"),
+            )
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(
+            batches[0].schema().as_ref(),
+            &driverbase::get_objects::get_objects_schema()
+        );
+    }
+
+    #[test]
+    fn like_pattern_matching() {
+        assert!(like_matches("datafusion", "data%"));
+        assert!(like_matches("public", "pub_ic"));
+        assert!(like_matches("a_b", r"a\_b"));
+        assert!(like_matches("a%b", r"a\%b"));
+        assert!(!like_matches("public", "pub_c"));
+        assert!(!like_matches("abc", "a_d"));
     }
 
     fn get_info_values(codes: Option<HashSet<InfoCode>>) -> HashMap<u32, String> {
