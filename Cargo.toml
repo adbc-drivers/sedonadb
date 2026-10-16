@@ -31,12 +31,16 @@ datafusion = { version = "54.1.0", default-features = false }
 driverbase = { git = "https://github.com/adbc-drivers/driverbase-rs.git", rev = "9749d0a3d71c71b77e6d79a8a946434a8cd9d3c2" }
 futures = "0.3"
 flate2 = { version = "1", optional = true }
-sedona = { git = "https://github.com/apache/sedona-db.git", rev = "751453f04cd6e09842adf3073b2b3dac7d1777bc", features = ["proj", "s2geography"] }
-sedona-extension = { git = "https://github.com/apache/sedona-db.git", rev = "751453f04cd6e09842adf3073b2b3dac7d1777bc" }
-sedona-proj = { git = "https://github.com/apache/sedona-db.git", rev = "751453f04cd6e09842adf3073b2b3dac7d1777bc", default-features = false }
+sedona = { git = "https://github.com/apache/sedona-db.git", rev = "0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae", features = ["proj", "s2geography"] }
+sedona-extension = { git = "https://github.com/apache/sedona-db.git", rev = "0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae" }
+sedona-proj = { git = "https://github.com/apache/sedona-db.git", rev = "0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae", default-features = false }
 tar = { version = "0.4", optional = true }
 tempfile = { version = "3", optional = true }
 tokio = { version = "1.52", features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+async-trait = "0.1"
+sedona-catalog = { git = "https://github.com/apache/sedona-db.git", rev = "0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae" }
 
 [features]
 default = ["ffi"]

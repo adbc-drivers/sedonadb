@@ -472,32 +472,30 @@ impl Connection for SedonaConnection {
         db_schema: Option<&str>,
         table_name: &str,
     ) -> Result<arrow_schema::Schema> {
-        let state = self.ctx.ctx.state();
-        let catalog_name = catalog.unwrap_or(&state.config_options().catalog.default_catalog);
-        let db_schema_name = db_schema.unwrap_or(&state.config_options().catalog.default_schema);
-
-        let catalog = state.catalog_list().catalog(catalog_name).ok_or_else(|| {
-            Error::with_message_and_status(
-                format!("Catalog {catalog_name:?} does not exist"),
-                Status::NotFound,
-            )
-        })?;
-        let db_schema = catalog.schema(db_schema_name).ok_or_else(|| {
-            Error::with_message_and_status(
-                format!("Schema {db_schema_name:?} does not exist in catalog {catalog_name:?}"),
-                Status::NotFound,
-            )
-        })?;
+        let table_ref = match (catalog, db_schema) {
+            (Some(catalog), Some(db_schema)) => {
+                datafusion::common::TableReference::full(catalog, db_schema, table_name)
+            }
+            (Some(catalog), None) => {
+                let state = self.ctx.ctx.state();
+                datafusion::common::TableReference::full(
+                    catalog,
+                    state.config_options().catalog.default_schema.clone(),
+                    table_name,
+                )
+            }
+            (None, Some(db_schema)) => {
+                datafusion::common::TableReference::partial(db_schema, table_name)
+            }
+            (None, None) => datafusion::common::TableReference::bare(table_name),
+        };
         let table = self
             .runtime
-            .block_on(db_schema.table(table_name))
+            .block_on(self.ctx.catalog_registry().table(table_ref.clone()))
             .map_err(from_datafusion_error)?
             .ok_or_else(|| {
                 Error::with_message_and_status(
-                    format!(
-                        "Table {table_name:?} does not exist in schema {db_schema_name:?} \
-                         of catalog {catalog_name:?}"
-                    ),
+                    format!("Table {table_ref} does not exist"),
                     Status::NotFound,
                 )
             })?;
@@ -553,7 +551,7 @@ fn get_info_codes() -> &'static driverbase::InfoRegistry {
             concat!("v", env!("CARGO_PKG_VERSION")),
         );
         registry.add_string(DriverbaseInfoCode::VendorName, "Apache SedonaDB");
-        registry.add_string(DriverbaseInfoCode::VendorVersion, "0.5.0");
+        registry.add_string(DriverbaseInfoCode::VendorVersion, "0.6.0");
         registry.add_string(
             DriverbaseInfoCode::VendorArrowVersion,
             format!("arrow-rs v{}", datafusion::arrow::ARROW_VERSION),
@@ -573,12 +571,79 @@ mod test {
 
     use adbc_core::{Database, Driver, Statement};
     use arrow_array::{StringArray, UInt32Array, UnionArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use async_trait::async_trait;
     use datafusion::assert_batches_eq;
-    use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
+    use datafusion::catalog::{
+        CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider, Session, TableProvider,
+    };
+    use datafusion::common::not_impl_err;
+    use datafusion::datasource::empty::EmptyTable;
+    use datafusion::physical_plan::ExecutionPlan;
+    use sedona_catalog::{
+        CatalogObject, CatalogObjectType, CreateObjectOptions, DropObjectOptions, SedonaCatalogList,
+    };
 
     use crate::driver::SedonaDriver;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct TestForeignCatalog;
+
+    #[async_trait]
+    impl SedonaCatalogList for TestForeignCatalog {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        async fn list_identifiers(
+            &self,
+            prefix: &[&str],
+            _depth: Option<usize>,
+        ) -> datafusion::common::Result<Vec<CatalogObject>> {
+            Ok((prefix == ["foreign"])
+                .then(|| CatalogObject {
+                    identifier: vec!["foreign".to_string()],
+                    object_type: CatalogObjectType::Catalog,
+                })
+                .into_iter()
+                .collect())
+        }
+
+        async fn table(
+            &self,
+            identifier: &[&str],
+        ) -> datafusion::common::Result<Option<Arc<dyn TableProvider>>> {
+            Ok(
+                (identifier == ["foreign", "public", "remote_table"]).then(|| {
+                    Arc::new(EmptyTable::new(Arc::new(Schema::new(vec![Field::new(
+                        "remote_value",
+                        DataType::Int64,
+                        false,
+                    )])))) as Arc<dyn TableProvider>
+                }),
+            )
+        }
+
+        async fn create_object(
+            &self,
+            _session: &dyn Session,
+            _identifier: &[&str],
+            _options: &CreateObjectOptions,
+            _input: Option<Arc<dyn ExecutionPlan>>,
+        ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+            not_impl_err!("test catalog is read-only")
+        }
+
+        async fn drop_object(
+            &self,
+            _identifier: &[&str],
+            _options: &DropObjectOptions,
+        ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+            not_impl_err!("test catalog is read-only")
+        }
+    }
 
     #[test]
     fn autocommit() {
@@ -926,6 +991,15 @@ mod test {
         assert_eq!(schema.field(0).name(), "value");
         assert_eq!(schema.field(0).data_type(), &arrow_schema::DataType::Int64);
 
+        connection
+            .ctx
+            .register_catalog_list(Arc::new(TestForeignCatalog));
+        let schema = connection
+            .get_table_schema(Some("foreign"), Some("public"), "remote_table")
+            .unwrap();
+        assert_eq!(schema.field(0).name(), "remote_value");
+        assert_eq!(schema.field(0).data_type(), &arrow_schema::DataType::Int64);
+
         for error in [
             connection
                 .get_table_schema(Some("missing"), Some("public"), "default_table")
@@ -1071,7 +1145,7 @@ mod test {
             concat!("v", env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(values[&u32::from(&InfoCode::VendorName)], "Apache SedonaDB");
-        assert_eq!(values[&u32::from(&InfoCode::VendorVersion)], "0.5.0");
+        assert_eq!(values[&u32::from(&InfoCode::VendorVersion)], "0.6.0");
         assert_eq!(
             values[&u32::from(&InfoCode::VendorArrowVersion)],
             format!("arrow-rs v{}", datafusion::arrow::ARROW_VERSION)
