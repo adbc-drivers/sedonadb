@@ -5,7 +5,6 @@ use adbc_core::{
     Connection,
     options::{InfoCode, ObjectDepth},
 };
-use adbc_core_0_23::options::InfoCode as DriverbaseInfoCode;
 use arrow_array::RecordBatchReader;
 use datafusion::{
     catalog::{CatalogProvider, CatalogProviderList, MemoryCatalogProviderList},
@@ -17,6 +16,7 @@ use driverbase::{
     get_objects::{ColumnInfo, GetObjectsImpl, TableAndColumnInfo, TableInfo},
 };
 use sedona::context::SedonaContext;
+use sedona_catalog::{CatalogObject, CatalogObjectType};
 use sedona_extension::runtime::RuntimeHandle;
 use std::sync::Arc;
 
@@ -95,6 +95,39 @@ impl SedonaGetObjects {
         self.catalog(catalog)?.schema(db_schema)
     }
 
+    /// Resolve ownership before listing children so foreign catalogs completely
+    /// shadow built-in catalogs and earlier foreign registrations, as in SQL.
+    fn foreign_objects(
+        &self,
+        prefix: &[&str],
+    ) -> std::result::Result<Option<Vec<CatalogObject>>, MetadataError> {
+        self.runtime.block_on(async {
+            let registry = self.ctx.catalog_registry();
+            let Some(owner) = registry
+                .foreign_catalog(prefix[0])
+                .await
+                .map_err(Self::metadata_error)?
+            else {
+                return Ok(None);
+            };
+            owner
+                .list_identifiers(prefix, Some(1))
+                .await
+                .map(|objects| {
+                    Some(
+                        objects
+                            .into_iter()
+                            .filter(|object| {
+                                object.identifier.len() == prefix.len() + 1
+                                    && object.identifier.iter().zip(prefix).all(|(a, b)| a == b)
+                            })
+                            .collect(),
+                    )
+                })
+                .map_err(Self::metadata_error)
+        })
+    }
+
     fn table_type_name(table_type: TableType) -> &'static str {
         match table_type {
             TableType::Base => "BASE TABLE",
@@ -115,7 +148,23 @@ impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
     ) -> std::result::Result<Vec<String>, MetadataError> {
         let state = self.ctx.ctx.state();
         let mut names = state.catalog_list().catalog_names();
+        for foreign in self.ctx.catalog_registry().foreign_lists().iter() {
+            let objects = self
+                .runtime
+                .block_on(foreign.list_identifiers(&[], Some(1)))
+                .map_err(Self::metadata_error)?;
+            names.extend(
+                objects
+                    .into_iter()
+                    .filter(|object| {
+                        object.object_type == CatalogObjectType::Catalog
+                            && object.identifier.len() == 1
+                    })
+                    .map(|object| object.identifier[0].clone()),
+            );
+        }
         names.sort();
+        names.dedup();
         names.retain(|name| filter.is_none_or(|pattern| like_matches(name, pattern)));
         Ok(names)
     }
@@ -125,10 +174,17 @@ impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
         catalog: &str,
         filter: Option<&str>,
     ) -> std::result::Result<Vec<String>, MetadataError> {
-        let Some(catalog) = self.catalog(catalog) else {
-            return Ok(Vec::new());
+        let mut names = if let Some(objects) = self.foreign_objects(&[catalog])? {
+            objects
+                .into_iter()
+                .filter(|object| object.object_type == CatalogObjectType::Schema)
+                .map(|object| object.identifier[1].clone())
+                .collect()
+        } else if let Some(catalog) = self.catalog(catalog) {
+            catalog.schema_names()
+        } else {
+            Vec::new()
         };
-        let mut names = catalog.schema_names();
         names.sort();
         names.retain(|name| filter.is_none_or(|pattern| like_matches(name, pattern)));
         Ok(names)
@@ -141,23 +197,37 @@ impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
         table_filter: Option<&str>,
         table_type_filter: Option<&[String]>,
     ) -> std::result::Result<Vec<TableInfo>, MetadataError> {
-        let Some(schema) = self.schema(catalog, db_schema) else {
-            return Ok(Vec::new());
+        let mut names = if let Some(objects) = self.foreign_objects(&[catalog, db_schema])? {
+            objects
+                .into_iter()
+                .filter(|object| {
+                    matches!(
+                        object.object_type,
+                        CatalogObjectType::Table | CatalogObjectType::View
+                    )
+                })
+                .map(|object| object.identifier[2].clone())
+                .collect()
+        } else if let Some(schema) = self.schema(catalog, db_schema) {
+            schema.table_names()
+        } else {
+            Vec::new()
         };
-        let mut names = schema.table_names();
         names.sort();
         names.retain(|name| table_filter.is_none_or(|pattern| like_matches(name, pattern)));
 
         let mut tables = Vec::with_capacity(names.len());
         for name in names {
-            let Some(table_type) = self
+            let Some(provider) = self
                 .runtime
-                .block_on(schema.table_type(&name))
+                .block_on(self.ctx.catalog_registry().table(
+                    datafusion::common::TableReference::full(catalog, db_schema, name.as_str()),
+                ))
                 .map_err(Self::metadata_error)?
             else {
                 continue;
             };
-            let table_type = Self::table_type_name(table_type);
+            let table_type = Self::table_type_name(provider.table_type());
             if table_type_filter.is_none_or(|types| types.iter().any(|value| value == table_type)) {
                 tables.push(TableInfo {
                     table_name: name,
@@ -176,15 +246,18 @@ impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
         table_type_filter: Option<&[String]>,
         column_filter: Option<&str>,
     ) -> std::result::Result<Vec<TableAndColumnInfo>, MetadataError> {
-        let Some(schema) = self.schema(catalog, db_schema) else {
-            return Ok(Vec::new());
-        };
         let tables = self.get_tables(catalog, db_schema, table_filter, table_type_filter)?;
         let mut result = Vec::with_capacity(tables.len());
         for table in tables {
             let Some(provider) = self
                 .runtime
-                .block_on(schema.table(&table.table_name))
+                .block_on(self.ctx.catalog_registry().table(
+                    datafusion::common::TableReference::full(
+                        catalog,
+                        db_schema,
+                        table.table_name.as_str(),
+                    ),
+                ))
                 .map_err(Self::metadata_error)?
             else {
                 continue;
@@ -193,11 +266,13 @@ impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
                 .schema()
                 .fields()
                 .iter()
-                .filter(|field| {
+                .enumerate()
+                .filter(|(_, field)| {
                     column_filter.is_none_or(|pattern| like_matches(field.name(), pattern))
                 })
-                .map(|field| ColumnInfo {
+                .map(|(index, field)| ColumnInfo {
                     column_name: field.name().clone(),
+                    ordinal_position: i32::try_from(index + 1).ok(),
                 })
                 .collect::<Vec<_>>();
             if column_filter.is_none() || !columns.is_empty() {
@@ -427,12 +502,6 @@ impl Connection for SedonaConnection {
         &self,
         codes: Option<std::collections::HashSet<InfoCode>>,
     ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
-        let codes = codes.map(|codes| {
-            codes
-                .into_iter()
-                .filter_map(|code| DriverbaseInfoCode::try_from(u32::from(&code)).ok())
-                .collect::<std::collections::HashSet<_>>()
-        });
         let info = get_info_codes();
         Ok(Box::new(info.get_info(codes).build()))
     }
@@ -451,13 +520,7 @@ impl Connection for SedonaConnection {
                 runtime: self.runtime.clone(),
                 ctx: self.ctx.clone(),
             },
-            match depth {
-                ObjectDepth::All => adbc_core_0_23::options::ObjectDepth::All,
-                ObjectDepth::Catalogs => adbc_core_0_23::options::ObjectDepth::Catalogs,
-                ObjectDepth::Schemas => adbc_core_0_23::options::ObjectDepth::Schemas,
-                ObjectDepth::Tables => adbc_core_0_23::options::ObjectDepth::Tables,
-                ObjectDepth::Columns => adbc_core_0_23::options::ObjectDepth::Columns,
-            },
+            depth,
             catalog,
             db_schema,
             table_name,
@@ -543,21 +606,21 @@ fn get_info_codes() -> &'static driverbase::InfoRegistry {
     INFO_CODES.get_or_init(|| {
         let mut registry = driverbase::InfoRegistry::new();
         registry.add_string(
-            DriverbaseInfoCode::DriverName,
+            InfoCode::DriverName,
             "ADBC Driver Foundry Driver for Apache SedonaDB",
         );
         registry.add_string(
-            DriverbaseInfoCode::DriverVersion,
+            InfoCode::DriverVersion,
             concat!("v", env!("CARGO_PKG_VERSION")),
         );
-        registry.add_string(DriverbaseInfoCode::VendorName, "Apache SedonaDB");
-        registry.add_string(DriverbaseInfoCode::VendorVersion, "0.6.0");
+        registry.add_string(InfoCode::VendorName, "Apache SedonaDB");
+        registry.add_string(InfoCode::VendorVersion, "0.6.0");
         registry.add_string(
-            DriverbaseInfoCode::VendorArrowVersion,
+            InfoCode::VendorArrowVersion,
             format!("arrow-rs v{}", datafusion::arrow::ARROW_VERSION),
         );
         registry.add_string(
-            DriverbaseInfoCode::DriverArrowVersion,
+            InfoCode::DriverArrowVersion,
             format!("arrow-rs v{}", datafusion::arrow::ARROW_VERSION),
         );
         registry
@@ -589,7 +652,10 @@ mod test {
     use super::*;
 
     #[derive(Debug)]
-    struct TestForeignCatalog;
+    struct TestForeignCatalog {
+        table_name: &'static str,
+        column_name: &'static str,
+    }
 
     #[async_trait]
     impl SedonaCatalogList for TestForeignCatalog {
@@ -600,15 +666,30 @@ mod test {
         async fn list_identifiers(
             &self,
             prefix: &[&str],
-            _depth: Option<usize>,
+            depth: Option<usize>,
         ) -> datafusion::common::Result<Vec<CatalogObject>> {
-            Ok((prefix == ["foreign"])
-                .then(|| CatalogObject {
-                    identifier: vec!["foreign".to_string()],
-                    object_type: CatalogObjectType::Catalog,
-                })
-                .into_iter()
-                .collect())
+            Ok([
+                (vec!["foreign"], CatalogObjectType::Catalog),
+                (vec!["foreign", "public"], CatalogObjectType::Schema),
+                (
+                    vec!["foreign", "public", self.table_name],
+                    CatalogObjectType::Table,
+                ),
+                (
+                    vec!["foreign", "public", "an_index"],
+                    CatalogObjectType::Index,
+                ),
+            ]
+            .into_iter()
+            .filter(|(identifier, _)| {
+                identifier.starts_with(prefix)
+                    && depth.is_none_or(|depth| identifier.len() <= prefix.len() + depth)
+            })
+            .map(|(identifier, object_type)| CatalogObject {
+                identifier: identifier.into_iter().map(str::to_string).collect(),
+                object_type,
+            })
+            .collect())
         }
 
         async fn table(
@@ -616,9 +697,9 @@ mod test {
             identifier: &[&str],
         ) -> datafusion::common::Result<Option<Arc<dyn TableProvider>>> {
             Ok(
-                (identifier == ["foreign", "public", "remote_table"]).then(|| {
+                (identifier == ["foreign", "public", self.table_name]).then(|| {
                     Arc::new(EmptyTable::new(Arc::new(Schema::new(vec![Field::new(
-                        "remote_value",
+                        self.column_name,
                         DataType::Int64,
                         false,
                     )])))) as Arc<dyn TableProvider>
@@ -993,7 +1074,10 @@ mod test {
 
         connection
             .ctx
-            .register_catalog_list(Arc::new(TestForeignCatalog));
+            .register_catalog_list(Arc::new(TestForeignCatalog {
+                table_name: "remote_table",
+                column_name: "remote_value",
+            }));
         let schema = connection
             .get_table_schema(Some("foreign"), Some("public"), "remote_table")
             .unwrap();
@@ -1084,6 +1168,170 @@ mod test {
         assert_eq!(
             batches[0].schema().as_ref(),
             &driverbase::get_objects::get_objects_schema()
+        );
+        let columns = metadata_columns(&batches[0]);
+        assert_eq!(
+            columns
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "population"
+        );
+        assert_eq!(
+            columns
+                .column(1)
+                .as_any()
+                .downcast_ref::<arrow_array::Int32Array>()
+                .unwrap()
+                .value(0),
+            2
+        );
+    }
+
+    fn metadata_columns(batch: &arrow_array::RecordBatch) -> arrow_array::StructArray {
+        use arrow_array::{ListArray, StructArray};
+        let schemas = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        let tables = schemas
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        let columns = tables
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        columns
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn get_objects_foreign_catalog_precedence() {
+        use datafusion::catalog::SchemaProvider;
+        let connection = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap();
+        let objects = SedonaGetObjects {
+            runtime: connection.runtime.clone(),
+            ctx: connection.ctx.clone(),
+        };
+        connection
+            .ctx
+            .register_catalog_list(Arc::new(TestForeignCatalog {
+                table_name: "older_table",
+                column_name: "older_value",
+            }));
+        // Catalogs that exist only in an extension must be discoverable.
+        assert_eq!(objects.get_catalogs(Some("for%")).unwrap(), ["foreign"]);
+        assert_eq!(
+            objects.get_db_schemas("foreign", Some("pub_ic")).unwrap(),
+            ["public"]
+        );
+        assert_eq!(
+            objects.get_tables("foreign", "public", None, None).unwrap()[0].table_name,
+            "older_table"
+        );
+
+        let builtin = Arc::new(MemoryCatalogProvider::new());
+        let schema = Arc::new(MemorySchemaProvider::new());
+        for name in ["remote_table", "builtin_only"] {
+            schema
+                .register_table(
+                    name.into(),
+                    Arc::new(EmptyTable::new(Arc::new(Schema::new(vec![Field::new(
+                        "local_value",
+                        DataType::Utf8,
+                        true,
+                    )])))),
+                )
+                .unwrap();
+        }
+        builtin.register_schema("public", schema).unwrap();
+        builtin
+            .register_schema("builtin_schema", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        connection.ctx.ctx.register_catalog("foreign", builtin);
+        connection
+            .ctx
+            .register_catalog_list(Arc::new(TestForeignCatalog {
+                table_name: "remote_table",
+                column_name: "remote_value",
+            }));
+        // Newest registration owns the whole catalog, with no merging or fallback.
+        assert_eq!(objects.get_catalogs(Some("foreign")).unwrap(), ["foreign"]);
+        assert_eq!(objects.get_db_schemas("foreign", None).unwrap(), ["public"]);
+        assert!(
+            objects
+                .get_tables("foreign", "builtin_schema", None, None)
+                .unwrap()
+                .is_empty()
+        );
+        let tables = objects.get_tables("foreign", "public", None, None).unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].table_name, "remote_table");
+        assert!(
+            objects
+                .get_tables("foreign", "public", Some("older_table"), None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            objects
+                .get_tables("foreign", "public", None, Some(&["VIEW".into()]))
+                .unwrap()
+                .is_empty()
+        );
+        let schema = connection
+            .get_table_schema(Some("foreign"), Some("public"), "remote_table")
+            .unwrap();
+        let batches = connection
+            .get_objects(
+                ObjectDepth::All,
+                Some("for%"),
+                Some("pub_ic"),
+                Some("remote_%"),
+                Some(vec!["BASE TABLE"]),
+                Some("remote_%"),
+            )
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        let columns = metadata_columns(&batches[0]);
+        assert_eq!(
+            columns
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            schema.field(0).name()
+        );
+        assert_eq!(schema.field(0).name(), "remote_value");
+        // Built-in catalogs not claimed by an extension still work.
+        assert_eq!(
+            objects.get_db_schemas("datafusion", None).unwrap(),
+            ["public"]
         );
     }
 

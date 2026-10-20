@@ -6,8 +6,7 @@ version = 4
 name = "adbc-driver-sedonadb"
 version = "0.1.0"
 dependencies = [
- "adbc_core 0.23.0",
- "adbc_core 0.24.0",
+ "adbc_core",
  "adbc_ffi",
  "arrow-array",
  "arrow-schema",
@@ -27,16 +26,6 @@ dependencies = [
 
 [[package]]
 name = "adbc_core"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46b169525a7c41670fe95874103c7c6ce713ac699123f81a200bc31f9ad3b02e"
-dependencies = [
- "arrow-array",
- "arrow-schema",
-]
-
-[[package]]
-name = "adbc_core"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "365059b13a01bbf6f324b5bfe328232a819679731431f78105e2883256236858"
@@ -51,7 +40,7 @@ version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12cdef84c12e9e8858b300440c36ca94ba24fb2e188175251dc39bb44ba3584e"
 dependencies = [
- "adbc_core 0.24.0",
+ "adbc_core",
  "arrow-array",
  "arrow-schema",
 ]
@@ -2073,9 +2062,9 @@ dependencies = [
 [[package]]
 name = "driverbase"
 version = "0.1.0"
-source = "git+https://github.com/adbc-drivers/driverbase-rs.git?rev=9749d0a3d71c71b77e6d79a8a946434a8cd9d3c2#9749d0a3d71c71b77e6d79a8a946434a8cd9d3c2"
+source = "git+https://github.com/adbc-drivers/driverbase-rs.git?rev=e452a3728c430110a01d05d1f417e74c83ecf2a8#e452a3728c430110a01d05d1f417e74c83ecf2a8"
 dependencies = [
- "adbc_core 0.23.0",
+ "adbc_core",
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
