@@ -65,6 +65,7 @@ pub struct SedonaConnection {
     runtime: Arc<RuntimeHandle>,
     ctx: Arc<SedonaContext>,
     autocommit_on: bool,
+    cancellation: crate::cancellation::Cancellation,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -80,9 +81,22 @@ type MetadataError = driverbase::error::Error<MetadataErrorHelper>;
 struct SedonaGetObjects {
     runtime: Arc<RuntimeHandle>,
     ctx: Arc<SedonaContext>,
+    operation: crate::cancellation::Operation,
 }
 
 impl SedonaGetObjects {
+    fn block_on<T>(
+        &self,
+        future: impl std::future::Future<Output = datafusion::common::Result<T>>,
+    ) -> std::result::Result<T, MetadataError> {
+        self.runtime
+            .block_on(
+                self.operation
+                    .run(async { future.await.map_err(from_datafusion_error) }),
+            )
+            .map_err(Self::metadata_error)
+    }
+
     fn catalog(&self, name: &str) -> Option<Arc<dyn CatalogProvider>> {
         self.ctx.ctx.state().catalog_list().catalog(name)
     }
@@ -101,31 +115,33 @@ impl SedonaGetObjects {
         &self,
         prefix: &[&str],
     ) -> std::result::Result<Option<Vec<CatalogObject>>, MetadataError> {
-        self.runtime.block_on(async {
-            let registry = self.ctx.catalog_registry();
-            let Some(owner) = registry
-                .foreign_catalog(prefix[0])
-                .await
-                .map_err(Self::metadata_error)?
-            else {
-                return Ok(None);
-            };
-            owner
-                .list_identifiers(prefix, Some(1))
-                .await
-                .map(|objects| {
-                    Some(
-                        objects
-                            .into_iter()
-                            .filter(|object| {
-                                object.identifier.len() == prefix.len() + 1
-                                    && object.identifier.iter().zip(prefix).all(|(a, b)| a == b)
-                            })
-                            .collect(),
-                    )
-                })
-                .map_err(Self::metadata_error)
-        })
+        self.runtime
+            .block_on(self.operation.run(async {
+                let registry = self.ctx.catalog_registry();
+                let Some(owner) = registry
+                    .foreign_catalog(prefix[0])
+                    .await
+                    .map_err(from_datafusion_error)?
+                else {
+                    return Ok(None);
+                };
+                owner
+                    .list_identifiers(prefix, Some(1))
+                    .await
+                    .map(|objects| {
+                        Some(
+                            objects
+                                .into_iter()
+                                .filter(|object| {
+                                    object.identifier.len() == prefix.len() + 1
+                                        && object.identifier.iter().zip(prefix).all(|(a, b)| a == b)
+                                })
+                                .collect(),
+                        )
+                    })
+                    .map_err(from_datafusion_error)
+            }))
+            .map_err(Self::metadata_error)
     }
 
     fn table_type_name(table_type: TableType) -> &'static str {
@@ -136,8 +152,8 @@ impl SedonaGetObjects {
         }
     }
 
-    fn metadata_error(error: datafusion::error::DataFusionError) -> MetadataError {
-        MetadataErrorHelper::internal_no_location().message(error.to_string())
+    fn metadata_error(error: Error) -> MetadataError {
+        MetadataErrorHelper::status(error.status).message(error.message)
     }
 }
 
@@ -146,13 +162,11 @@ impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
         &self,
         filter: Option<&str>,
     ) -> std::result::Result<Vec<String>, MetadataError> {
+        self.block_on(async { Ok(()) })?;
         let state = self.ctx.ctx.state();
         let mut names = state.catalog_list().catalog_names();
         for foreign in self.ctx.catalog_registry().foreign_lists().iter() {
-            let objects = self
-                .runtime
-                .block_on(foreign.list_identifiers(&[], Some(1)))
-                .map_err(Self::metadata_error)?;
+            let objects = self.block_on(foreign.list_identifiers(&[], Some(1)))?;
             names.extend(
                 objects
                     .into_iter()
@@ -218,12 +232,9 @@ impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
 
         let mut tables = Vec::with_capacity(names.len());
         for name in names {
-            let Some(provider) = self
-                .runtime
-                .block_on(self.ctx.catalog_registry().table(
-                    datafusion::common::TableReference::full(catalog, db_schema, name.as_str()),
-                ))
-                .map_err(Self::metadata_error)?
+            let Some(provider) = self.block_on(self.ctx.catalog_registry().table(
+                datafusion::common::TableReference::full(catalog, db_schema, name.as_str()),
+            ))?
             else {
                 continue;
             };
@@ -249,16 +260,13 @@ impl GetObjectsImpl<MetadataErrorHelper> for SedonaGetObjects {
         let tables = self.get_tables(catalog, db_schema, table_filter, table_type_filter)?;
         let mut result = Vec::with_capacity(tables.len());
         for table in tables {
-            let Some(provider) = self
-                .runtime
-                .block_on(self.ctx.catalog_registry().table(
-                    datafusion::common::TableReference::full(
-                        catalog,
-                        db_schema,
-                        table.table_name.as_str(),
-                    ),
-                ))
-                .map_err(Self::metadata_error)?
+            let Some(provider) = self.block_on(self.ctx.catalog_registry().table(
+                datafusion::common::TableReference::full(
+                    catalog,
+                    db_schema,
+                    table.table_name.as_str(),
+                ),
+            ))?
             else {
                 continue;
             };
@@ -353,6 +361,7 @@ impl SedonaConnection {
             runtime,
             ctx: Arc::new(ctx),
             autocommit_on: true,
+            cancellation: Default::default(),
         };
 
         let mut current_catalog = None;
@@ -491,11 +500,16 @@ impl Connection for SedonaConnection {
     type StatementType = SedonaStatement;
 
     fn new_statement(&mut self) -> Result<SedonaStatement> {
-        Ok(SedonaStatement::new(self.runtime.clone(), self.ctx.clone()))
+        Ok(SedonaStatement::new(
+            self.runtime.clone(),
+            self.ctx.clone(),
+            self.cancellation.clone(),
+        ))
     }
 
     fn cancel(&mut self) -> Result<()> {
-        err_not_implemented!()
+        self.cancellation.cancel();
+        Ok(())
     }
 
     fn get_info(
@@ -515,10 +529,12 @@ impl Connection for SedonaConnection {
         table_type: Option<Vec<&str>>,
         column_name: Option<&str>,
     ) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
-        Ok(driverbase::get_objects::get_objects(
+        let operation = crate::cancellation::Operation::connection(&self.cancellation);
+        let reader = driverbase::get_objects::get_objects(
             SedonaGetObjects {
                 runtime: self.runtime.clone(),
                 ctx: self.ctx.clone(),
+                operation: operation.clone(),
             },
             depth,
             catalog,
@@ -526,7 +542,8 @@ impl Connection for SedonaConnection {
             table_name,
             table_type,
             column_name,
-        ))
+        );
+        Ok(Box::new(operation.wrap_reader(reader)))
     }
 
     fn get_table_schema(
@@ -552,10 +569,16 @@ impl Connection for SedonaConnection {
             }
             (None, None) => datafusion::common::TableReference::bare(table_name),
         };
+        let operation = crate::cancellation::Operation::connection(&self.cancellation);
         let table = self
             .runtime
-            .block_on(self.ctx.catalog_registry().table(table_ref.clone()))
-            .map_err(from_datafusion_error)?
+            .block_on(operation.run(async {
+                self.ctx
+                    .catalog_registry()
+                    .table(table_ref.clone())
+                    .await
+                    .map_err(from_datafusion_error)
+            }))?
             .ok_or_else(|| {
                 Error::with_message_and_status(
                     format!("Table {table_ref} does not exist"),
@@ -724,6 +747,34 @@ mod test {
         ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
             not_impl_err!("test catalog is read-only")
         }
+    }
+
+    #[test]
+    fn cancel_metadata_reader() {
+        let mut connection = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap();
+        let mut reader = connection
+            .get_objects(ObjectDepth::All, None, None, None, None, None)
+            .unwrap();
+        connection.cancel().unwrap();
+        assert!(
+            reader
+                .next()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+        assert!(reader.next().is_none());
+        let batches = connection
+            .get_objects(ObjectDepth::All, None, None, None, None, None)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!batches.is_empty());
     }
 
     #[test]
@@ -1123,6 +1174,7 @@ mod test {
         let objects = SedonaGetObjects {
             runtime: connection.runtime.clone(),
             ctx: connection.ctx.clone(),
+            operation: crate::cancellation::Operation::connection(&connection.cancellation),
         };
         assert_eq!(objects.get_catalogs(Some("data%")).unwrap(), ["datafusion"]);
         assert_eq!(
@@ -1234,6 +1286,7 @@ mod test {
         let objects = SedonaGetObjects {
             runtime: connection.runtime.clone(),
             ctx: connection.ctx.clone(),
+            operation: crate::cancellation::Operation::connection(&connection.cancellation),
         };
         connection
             .ctx

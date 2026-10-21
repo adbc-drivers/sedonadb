@@ -43,3 +43,24 @@ Statements track the standard ADBC bulk-ingestion options
 `adbc.ingest.target_db_schema`, and `adbc.ingest.mode`. The
 `adbc.ingest.temporary` option accepts `false`; temporary ingestion is not yet
 supported.
+
+## Cancellation
+
+`Connection::cancel()` cancels outstanding queries and metadata reads on that
+connection. `Statement::cancel()` cancels outstanding executions of that statement
+without affecting sibling statements. Both methods are repeatable, and the same
+connection and statements can execute new work after cancellation.
+
+Each operation captures the current Tokio cancellation tokens from its handles.
+Cancellation replaces the handle's token and cancels the previous generation.
+Planning and pending batch reads select on those tokens; cancellation drops the
+DataFusion future or output stream. Readers check cancellation before returning
+prefetched batches, report one cancellation error, and then return end-of-stream.
+An idle reader observes cancellation when next read or dropped. Cancellation is
+cooperative and does not preempt synchronous work inside a future's poll.
+
+Completed, failed, or dropped operations release their tokens automatically;
+handles do not retain a registry of operations. With the Rust ADBC traits,
+`cancel()` requires mutable access to the handle, so a connection can cancel a
+statement executing on another thread, and a statement can cancel its returned
+reader while that reader is being consumed on another thread.

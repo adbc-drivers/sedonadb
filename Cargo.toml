@@ -36,7 +36,8 @@ sedona-extension = { git = "https://github.com/apache/sedona-db.git", rev = "034
 sedona-proj = { git = "https://github.com/apache/sedona-db.git", rev = "0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae", default-features = false }
 tar = { version = "0.4", optional = true }
 tempfile = { version = "3", optional = true }
-tokio = { version = "1.52", features = ["rt-multi-thread"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros"] }
+tokio-util = "0.7"
 
 [dev-dependencies]
 async-trait = "0.1"
