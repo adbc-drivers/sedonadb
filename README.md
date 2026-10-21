@@ -49,11 +49,14 @@ supported.
 Use `Statement::bind()` or `bind_stream()` to supply Arrow parameter values.
 Each row executes the query once; streams may contain multiple batches. Numeric
 placeholders (`$1`, `$2`, ...) bind by column position, and named placeholders
-(`$name`) bind to Arrow fields with matching names (without `$`). Values are cast
-to inferred parameter types when necessary, with invalid casts reported as errors.
+(`$name`) bind to Arrow fields with matching names (without `$`). Values retain their Arrow types and extension metadata; SQL expression coercion
+is left to DataFusion.
 
 `get_parameter_schema()` reports inferred types, using Arrow Null for unknown
-types. `execute_schema()` uses the bound schema without consuming input.
+types. The first parameter row determines the output schema, including extension
+metadata. Schema inspection reads ahead to that row and retains it for execution.
+Later rows must produce the same output schema; nullable output fields allow
+parameter values to alternate between null and non-null.
 `execute()` consumes the binding and returns results lazily; bind again before
 another parameterized execution. Bulk ingestion and `execute_update()` remain
 unsupported.

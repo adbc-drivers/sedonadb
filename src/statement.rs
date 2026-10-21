@@ -5,7 +5,6 @@ use adbc_core::{PartitionedResult, constants};
 use arrow_array::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use datafusion::{
-    arrow::compute::CastOptions,
     common::{ParamValues, ScalarValue, metadata::ScalarAndMetadata},
     dataframe::DataFrame,
 };
@@ -27,7 +26,7 @@ pub struct SedonaStatement {
     ctx: Arc<SedonaContext>,
     sql_query: Option<String>,
     ingest: IngestOptions,
-    bound: Option<Box<dyn RecordBatchReader + Send>>,
+    bound: Option<BoundParameters>,
 }
 
 #[derive(Debug)]
@@ -160,12 +159,16 @@ impl Statement for SedonaStatement {
         if let Some(query) = self.sql_query.clone() {
             self.runtime.block_on(async {
                 let df = self.ctx.sql(&query).await.map_err(from_datafusion_error)?;
-                let df = if let Some(bound) = &self.bound {
-                    bind_parameters(df, &bound.schema(), None)?
+                let df = if let Some(bound) = &mut self.bound {
+                    bound.bind_first(df)?
                 } else {
                     df
                 };
-                Ok(df.schema().as_arrow().clone())
+                Ok(if self.bound.is_some() {
+                    parameter_output_schema(&df).as_ref().clone()
+                } else {
+                    df.schema().as_arrow().clone()
+                })
             })
         } else {
             Err(Error::with_message_and_status(
@@ -179,13 +182,8 @@ impl Statement for SedonaStatement {
         if let Some(query) = self.sql_query.clone() {
             self.runtime.block_on(async {
                 let df = self.ctx.sql(&query).await.map_err(from_datafusion_error)?;
-                if let Some(bound) = &self.bound {
-                    let schema = Arc::new(
-                        bind_parameters(df.clone(), &bound.schema(), None)?
-                            .schema()
-                            .as_arrow()
-                            .clone(),
-                    );
+                if let Some(bound) = &mut self.bound {
+                    let schema = parameter_output_schema(&bound.bind_first(df.clone())?);
                     return Ok(Box::new(ParameterReader {
                         runtime: self.runtime.clone(),
                         df,
@@ -224,7 +222,10 @@ impl Statement for SedonaStatement {
     }
 
     fn bind_stream(&mut self, reader: Box<dyn RecordBatchReader + Send>) -> Result<()> {
-        self.bound = Some(reader);
+        self.bound = Some(BoundParameters {
+            reader,
+            first: None,
+        });
         Ok(())
     }
 
@@ -272,14 +273,14 @@ impl Statement for SedonaStatement {
 }
 
 // Bind by ordinal for $1, $2, ... and by Arrow field name for $name.
-// A typed null supplies schema information without consuming the input stream.
+// Empty input uses typed nulls to determine a result schema.
 fn bind_parameters(
     df: DataFrame,
     schema: &Schema,
     row: Option<(&RecordBatch, usize)>,
 ) -> Result<DataFrame> {
     let mut values = std::collections::HashMap::new();
-    for (id, expected) in df
+    for (id, _) in df
         .logical_plan()
         .get_parameter_fields()
         .map_err(from_datafusion_error)?
@@ -299,26 +300,11 @@ fn bind_parameters(
             )
         })?;
         let field = schema.field(index);
-        let mut value = match row {
+        let value = match row {
             Some((batch, row)) => ScalarValue::try_from_array(batch.column(index), row),
             None => ScalarValue::try_from(field.data_type()),
         }
         .map_err(from_datafusion_error)?;
-        if let Some(expected) = expected
-            && expected.data_type() != &DataType::Null
-        {
-            value = value
-                .cast_to_with_options(
-                    expected.data_type(),
-                    &CastOptions {
-                        safe: false,
-                        ..Default::default()
-                    },
-                )
-                .map_err(|err| {
-                    Error::with_message_and_status(err.to_string(), Status::InvalidArguments)
-                })?;
-        }
         values.insert(
             name.to_string(),
             ScalarAndMetadata::new(value, Some(field.metadata().clone().into())),
@@ -328,12 +314,54 @@ fn bind_parameters(
         .map_err(from_datafusion_error)
 }
 
+// Parameter nulls may vary from row to row; expose nullable fields consistently.
+fn parameter_output_schema(df: &DataFrame) -> SchemaRef {
+    let schema = df.schema().as_arrow();
+    Arc::new(Schema::new_with_metadata(
+        schema
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone().with_nullable(true))
+            .collect::<Vec<_>>(),
+        schema.metadata().clone(),
+    ))
+}
+
+struct BoundParameters {
+    reader: Box<dyn RecordBatchReader + Send>,
+    first: Option<RecordBatch>,
+}
+
+impl BoundParameters {
+    fn bind_first(&mut self, df: DataFrame) -> Result<DataFrame> {
+        while self.first.is_none() {
+            match self.reader.next() {
+                Some(Ok(batch)) if batch.num_rows() > 0 => self.first = Some(batch),
+                Some(Ok(_)) => continue,
+                Some(Err(err)) => {
+                    return Err(Error::with_message_and_status(err.to_string(), Status::IO));
+                }
+                None => break,
+            }
+        }
+        bind_parameters(
+            df,
+            &self.reader.schema(),
+            self.first.as_ref().map(|batch| (batch, 0)),
+        )
+    }
+
+    fn next_batch(&mut self) -> Option<std::result::Result<RecordBatch, ArrowError>> {
+        self.first.take().map(Ok).or_else(|| self.reader.next())
+    }
+}
+
 // Consume parameter rows and their result streams lazily, retaining only one
 // input batch and one query result reader at a time.
 struct ParameterReader {
     runtime: Arc<RuntimeHandle>,
     df: DataFrame,
-    bound: Box<dyn RecordBatchReader + Send>,
+    bound: BoundParameters,
     schema: SchemaRef,
     batch: Option<RecordBatch>,
     row: usize,
@@ -363,7 +391,7 @@ impl ParameterReader {
                 .as_ref()
                 .is_none_or(|batch| self.row == batch.num_rows())
             {
-                match self.bound.next() {
+                match self.bound.next_batch() {
                     Some(batch) => {
                         self.batch = Some(batch?);
                         self.row = 0;
@@ -375,6 +403,11 @@ impl ParameterReader {
             let batch = self.batch.as_ref().unwrap();
             let df = bind_parameters(self.df.clone(), &batch.schema(), Some((batch, self.row)))
                 .map_err(|err| ArrowError::ExternalError(Box::new(err)))?;
+            if parameter_output_schema(&df) != self.schema {
+                return Err(ArrowError::SchemaError(
+                    "Bound parameters changed the output schema".into(),
+                ));
+            }
             self.row += 1;
             let stream = self.runtime.block_on(df.execute_stream())?;
             self.results = Some(
@@ -544,6 +577,120 @@ mod test {
     }
 
     #[test]
+    fn bind_spatial_parameter_with_crs() {
+        let mut source = parameter_statement("SELECT ST_SetSRID(ST_Point(1, 2), 4326) AS geom");
+        let spatial = source.execute().unwrap().next().unwrap().unwrap();
+        let metadata = spatial.schema().field(0).metadata().clone();
+        assert!(metadata.contains_key("ARROW:extension:name"));
+        assert!(
+            metadata
+                .get("ARROW:extension:metadata")
+                .unwrap()
+                .contains("OGC:CRS84")
+        );
+        for query in ["SELECT $1 AS geom", "SELECT $geom AS geom"] {
+            let mut statement = parameter_statement(query);
+            statement.bind(spatial.clone()).unwrap();
+            let schema = statement.execute_schema().unwrap();
+            assert_eq!(schema.field(0).metadata(), &metadata);
+            let batches = statement
+                .execute()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(batches[0].schema().field(0).metadata(), &metadata);
+            assert_eq!(batches[0].column(0), spatial.column(0));
+        }
+        let mut statement = parameter_statement("SELECT ST_AsText($1) AS wkt, ST_SRID($1) AS srid");
+        statement.bind(spatial).unwrap();
+        let batches = statement
+            .execute()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_batches_eq!(
+            [
+                "+------------+------+",
+                "| wkt        | srid |",
+                "+------------+------+",
+                "| POINT(1 2) | 4326 |",
+                "+------------+------+",
+            ],
+            &batches
+        );
+    }
+
+    #[test]
+    fn bound_type_is_not_cast_to_inferred_parameter_type() {
+        let mut statement = parameter_statement("SELECT $1 + 1 AS value");
+        assert_eq!(
+            statement
+                .get_parameter_schema()
+                .unwrap()
+                .field(0)
+                .data_type(),
+            &arrow_schema::DataType::Int64
+        );
+        statement
+            .bind(
+                RecordBatch::try_from_iter(vec![(
+                    "",
+                    std::sync::Arc::new(Float64Array::from(vec![1.5])) as arrow_array::ArrayRef,
+                )])
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            statement.execute_schema().unwrap().field(0).data_type(),
+            &arrow_schema::DataType::Float64
+        );
+        let batches = statement
+            .execute()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_batches_eq!(
+            [
+                "+-------+",
+                "| value |",
+                "+-------+",
+                "| 2.5   |",
+                "+-------+"
+            ],
+            &batches
+        );
+    }
+
+    #[test]
+    fn parameter_values_determine_schema_and_changes_are_rejected() {
+        let mut statement = parameter_statement("SELECT ST_SetSRID(ST_Point(1, 2), $1) AS geom");
+        statement
+            .bind(parameter_batch("", vec![Some(4326), Some(3857)]))
+            .unwrap();
+        let schema = statement.execute_schema().unwrap();
+        assert!(
+            schema
+                .field(0)
+                .metadata()
+                .get("ARROW:extension:metadata")
+                .unwrap()
+                .contains("OGC:CRS84")
+        );
+        let mut reader = statement.execute().unwrap();
+        assert_eq!(reader.schema().as_ref(), &schema);
+        assert!(reader.next().unwrap().is_ok());
+        assert!(
+            reader
+                .next()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("changed the output schema")
+        );
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
     fn bind_multiple_parameters_to_spatial_query() {
         for sql in [
             "SELECT ST_AsText(ST_Point($1, $2)) AS geom",
@@ -646,13 +793,17 @@ mod test {
         let schema = parameter_batch("", vec![Some(1)]).schema();
         statement
             .bind_stream(Box::new(arrow_array::RecordBatchIterator::new(
-                vec![Err(arrow_schema::ArrowError::ComputeError(
-                    "input failed".into(),
-                ))],
+                vec![
+                    Ok(parameter_batch("", vec![Some(1)])),
+                    Err(arrow_schema::ArrowError::ComputeError(
+                        "input failed".into(),
+                    )),
+                ],
                 schema,
             )))
             .unwrap();
         let mut reader = statement.execute().unwrap();
+        assert!(reader.next().unwrap().is_ok());
         assert!(
             reader
                 .next()
@@ -671,9 +822,14 @@ mod test {
         )])
         .unwrap();
         statement.bind(batch).unwrap();
-        let mut reader = statement.execute().unwrap();
-        assert!(reader.next().unwrap().is_err());
-        assert!(reader.next().is_none());
+        assert!(
+            statement
+                .execute()
+                .err()
+                .unwrap()
+                .message
+                .contains("Cannot coerce")
+        );
     }
 
     #[test]
@@ -694,7 +850,7 @@ mod test {
     }
 
     #[test]
-    fn parameter_schema_and_inferred_cast() {
+    fn parameter_schema_and_expression_coercion() {
         let statement = parameter_statement("SELECT $10, $2, $1 + 1, $1 + 2");
         let schema = statement.get_parameter_schema().unwrap();
         assert_eq!(
