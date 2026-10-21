@@ -43,3 +43,20 @@ Statements track the standard ADBC bulk-ingestion options
 `adbc.ingest.target_db_schema`, and `adbc.ingest.mode`. The
 `adbc.ingest.temporary` option accepts `false`; temporary ingestion is not yet
 supported.
+
+## Parameter binding
+
+Use `Statement::bind()` or `bind_stream()` to supply Arrow parameter values.
+Each row executes the query once; streams may contain multiple batches. Numeric
+placeholders (`$1`, `$2`, ...) bind by column position, and named placeholders
+(`$name`) bind to Arrow fields with matching names (without `$`). Values retain their Arrow types and extension metadata; SQL expression coercion
+is left to DataFusion.
+
+`get_parameter_schema()` reports inferred types, using Arrow Null for unknown
+types. The first parameter row determines the output schema, including extension
+metadata. Schema inspection reads ahead to that row and retains it for execution.
+Later rows must produce the same output schema; nullable output fields allow
+parameter values to alternate between null and non-null.
+`execute()` consumes the binding and returns results lazily; bind again before
+another parameterized execution. Bulk ingestion and `execute_update()` remain
+unsupported.
