@@ -1,6 +1,7 @@
 // Copyright (c) 2026 ADBC Drivers Contributors
 // Licensed under the Apache License, Version 2.0.
 
+mod cancellation;
 mod utils;
 
 #[cfg(feature = "bundled-proj-data")]

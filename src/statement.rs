@@ -1,12 +1,12 @@
 // Copyright (c) 2026 ADBC Drivers Contributors
 // Licensed under the Apache License, Version 2.0.
 
+use crate::cancellation::{Cancellation, Operation};
 use adbc_core::{PartitionedResult, constants};
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::Schema;
 use sedona::context::SedonaContext;
 use sedona_extension::runtime::RuntimeHandle;
-use sedona_extension::streaming::StreamingRecordBatchReader;
 use std::sync::Arc;
 
 use adbc_core::{
@@ -22,6 +22,8 @@ pub struct SedonaStatement {
     ctx: Arc<SedonaContext>,
     sql_query: Option<String>,
     ingest: IngestOptions,
+    connection_cancellation: Cancellation,
+    cancellation: Cancellation,
 }
 
 #[derive(Debug)]
@@ -46,12 +48,18 @@ impl Default for IngestOptions {
 }
 
 impl SedonaStatement {
-    pub(crate) fn new(runtime: Arc<RuntimeHandle>, ctx: Arc<SedonaContext>) -> SedonaStatement {
+    pub(crate) fn new(
+        runtime: Arc<RuntimeHandle>,
+        ctx: Arc<SedonaContext>,
+        connection_cancellation: Cancellation,
+    ) -> SedonaStatement {
         Self {
             runtime,
             ctx,
             sql_query: None,
             ingest: IngestOptions::default(),
+            connection_cancellation,
+            cancellation: Default::default(),
         }
     }
 }
@@ -151,10 +159,11 @@ impl Statement for SedonaStatement {
 
     fn execute_schema(&mut self) -> Result<Schema> {
         if let Some(query) = self.sql_query.clone() {
-            self.runtime.block_on(async {
+            let operation = Operation::new(&self.connection_cancellation, &self.cancellation);
+            self.runtime.block_on(operation.run(async {
                 let df = self.ctx.sql(&query).await.map_err(from_datafusion_error)?;
                 Ok(df.schema().as_arrow().clone())
-            })
+            }))
         } else {
             Err(Error::with_message_and_status(
                 "query not set yet",
@@ -165,13 +174,12 @@ impl Statement for SedonaStatement {
 
     fn execute(&mut self) -> Result<Box<dyn RecordBatchReader + Send + 'static>> {
         if let Some(query) = self.sql_query.clone() {
-            self.runtime.block_on(async {
+            let operation = Operation::new(&self.connection_cancellation, &self.cancellation);
+            let stream = self.runtime.block_on(operation.run(async {
                 let df = self.ctx.sql(&query).await.map_err(from_datafusion_error)?;
-                let stream = df.execute_stream().await.map_err(from_datafusion_error)?;
-                let reader = StreamingRecordBatchReader::new(stream, self.runtime.clone())
-                    .with_skip_empty_batches(true);
-                Ok(Box::new(reader) as Box<dyn RecordBatchReader + Send + 'static>)
-            })
+                df.execute_stream().await.map_err(from_datafusion_error)
+            }))?;
+            Ok(Box::new(operation.reader(stream, self.runtime.clone())))
         } else {
             Err(Error::with_message_and_status(
                 "query not set yet",
@@ -205,7 +213,8 @@ impl Statement for SedonaStatement {
     }
 
     fn cancel(&mut self) -> Result<()> {
-        err_not_implemented!()
+        self.cancellation.cancel();
+        Ok(())
     }
 }
 
@@ -223,6 +232,95 @@ mod test {
     use datafusion::assert_batches_eq;
 
     use crate::driver::SedonaDriver;
+
+    #[test]
+    fn cancellation_scope_and_reuse() {
+        let database = SedonaDriver::default().new_database().unwrap();
+        let mut connection = database.new_connection().unwrap();
+        let mut other_connection = database.new_connection().unwrap();
+        let mut first = connection.new_statement().unwrap();
+        let mut second = connection.new_statement().unwrap();
+        let mut unrelated = other_connection.new_statement().unwrap();
+        for statement in [&mut first, &mut second, &mut unrelated] {
+            statement.set_sql_query("SELECT 42").unwrap();
+        }
+
+        // All outstanding executions of a statement share its current generation.
+        let mut first_reader = first.execute().unwrap();
+        let mut another_first_reader = first.execute().unwrap();
+        let mut second_reader = second.execute().unwrap();
+        first.cancel().unwrap();
+        for reader in [&mut first_reader, &mut another_first_reader] {
+            assert!(
+                reader
+                    .next()
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cancelled")
+            );
+            assert!(reader.next().is_none());
+        }
+        assert!(second_reader.next().unwrap().is_ok());
+        assert!(first.execute().unwrap().next().unwrap().is_ok());
+
+        let mut first_reader = first.execute().unwrap();
+        let mut second_reader = second.execute().unwrap();
+        let mut unrelated_reader = unrelated.execute().unwrap();
+        connection.cancel().unwrap();
+        connection.cancel().unwrap();
+        for reader in [&mut first_reader, &mut second_reader] {
+            assert!(
+                reader
+                    .next()
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cancelled")
+            );
+            assert!(reader.next().is_none());
+        }
+        assert!(unrelated_reader.next().unwrap().is_ok());
+        // Existing statements mint fresh connection tokens on each execution.
+        assert!(first.execute().unwrap().next().unwrap().is_ok());
+        assert!(second.execute_schema().is_ok());
+        let mut fresh = connection.new_statement().unwrap();
+        fresh.set_sql_query("SELECT 1").unwrap();
+        assert!(fresh.execute().unwrap().next().unwrap().is_ok());
+    }
+
+    #[test]
+    fn cancellation_after_prefetch_and_completion() {
+        let mut statement = SedonaDriver::default()
+            .new_database()
+            .unwrap()
+            .new_connection()
+            .unwrap()
+            .new_statement()
+            .unwrap();
+        statement
+            .set_sql_query("SELECT * FROM generate_series(1, 100000)")
+            .unwrap();
+        let mut reader = statement.execute().unwrap();
+        assert!(reader.next().unwrap().is_ok());
+        statement.cancel().unwrap();
+        assert!(
+            reader
+                .next()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+        assert!(reader.next().is_none());
+
+        statement.set_sql_query("SELECT 1").unwrap();
+        let mut reader = statement.execute().unwrap();
+        assert!(reader.next().unwrap().is_ok());
+        assert!(reader.next().is_none());
+        statement.cancel().unwrap();
+        assert!(reader.next().is_none());
+    }
 
     #[test]
     fn statement() {
