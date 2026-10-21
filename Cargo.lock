@@ -6,31 +6,22 @@ version = 4
 name = "adbc-driver-sedonadb"
 version = "0.1.0"
 dependencies = [
- "adbc_core 0.23.0",
- "adbc_core 0.24.0",
+ "adbc_core",
  "adbc_ffi",
  "arrow-array",
  "arrow-schema",
+ "async-trait",
  "datafusion",
  "driverbase",
  "flate2",
  "futures",
  "sedona",
+ "sedona-catalog",
  "sedona-extension",
  "sedona-proj",
  "tar",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "adbc_core"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46b169525a7c41670fe95874103c7c6ce713ac699123f81a200bc31f9ad3b02e"
-dependencies = [
- "arrow-array",
- "arrow-schema",
 ]
 
 [[package]]
@@ -49,7 +40,7 @@ version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12cdef84c12e9e8858b300440c36ca94ba24fb2e188175251dc39bb44ba3584e"
 dependencies = [
- "adbc_core 0.24.0",
+ "adbc_core",
  "arrow-array",
  "arrow-schema",
 ]
@@ -2071,9 +2062,9 @@ dependencies = [
 [[package]]
 name = "driverbase"
 version = "0.1.0"
-source = "git+https://github.com/adbc-drivers/driverbase-rs.git?rev=9749d0a3d71c71b77e6d79a8a946434a8cd9d3c2#9749d0a3d71c71b77e6d79a8a946434a8cd9d3c2"
+source = "git+https://github.com/adbc-drivers/driverbase-rs.git?rev=e452a3728c430110a01d05d1f417e74c83ecf2a8#e452a3728c430110a01d05d1f417e74c83ecf2a8"
 dependencies = [
- "adbc_core 0.23.0",
+ "adbc_core",
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
@@ -2483,9 +2474,9 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.33.11"
+version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35b4e837a1d133645d1dcf283e146a4b9901e390a1c13545f959cfed3a72f24f"
+checksum = "fc148d4ddd3930c52f9e5ae79b89805c6f07e9ff417e7b083e0348cea60a5aba"
 
 [[package]]
 name = "glob"
@@ -4232,8 +4223,8 @@ dependencies = [
 
 [[package]]
 name = "sedona"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -4249,6 +4240,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-ffi",
  "datafusion-optimizer",
+ "datafusion-physical-plan",
  "datafusion-session",
  "dirs",
  "futures",
@@ -4257,6 +4249,7 @@ dependencies = [
  "object_store",
  "parking_lot",
  "regex",
+ "sedona-catalog",
  "sedona-common",
  "sedona-datasource",
  "sedona-expr",
@@ -4285,9 +4278,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sedona-catalog"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
+dependencies = [
+ "async-trait",
+ "datafusion-catalog",
+ "datafusion-common",
+ "datafusion-physical-plan",
+ "serde",
+]
+
+[[package]]
 name = "sedona-common"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "datafusion-common",
  "regex",
@@ -4296,8 +4301,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-datasource"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4319,8 +4324,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-expr"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -4339,8 +4344,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-extension"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4355,6 +4360,7 @@ dependencies = [
  "futures",
  "libc",
  "prost",
+ "sedona-catalog",
  "sedona-common",
  "sedona-expr",
  "sedona-schema",
@@ -4366,8 +4372,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-functions"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -4388,8 +4394,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-gdal"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "libloading",
  "sedona-raster",
@@ -4398,8 +4404,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-geo"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4421,8 +4427,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-geo-generic-alg"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "float_next_after 2.0.0",
  "geo-traits",
@@ -4437,8 +4443,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-geo-traits-ext"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "byteorder",
  "geo-traits",
@@ -4449,8 +4455,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-geometry"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "geo-traits",
  "lru",
@@ -4462,8 +4468,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-geoparquet"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4498,8 +4504,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-geos"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4519,8 +4525,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-proj"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "geo-traits",
  "libloading",
@@ -4532,8 +4538,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-query-planner"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4554,8 +4560,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-raster"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -4570,8 +4576,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-raster-functions"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -4592,8 +4598,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-raster-gdal"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -4614,8 +4620,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-s2geography"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4637,8 +4643,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-schema"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4651,8 +4657,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-spatial-join"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -4695,8 +4701,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-spatial-join-geography"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -4721,8 +4727,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-spatial-join-raster"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4743,8 +4749,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-testing"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-cast",
@@ -4768,8 +4774,8 @@ dependencies = [
 
 [[package]]
 name = "sedona-tg"
-version = "0.5.0"
-source = "git+https://github.com/apache/sedona-db.git?rev=242e4ffe329c36dead87f163331d3041409e7aac#242e4ffe329c36dead87f163331d3041409e7aac"
+version = "0.6.0"
+source = "git+https://github.com/apache/sedona-db.git?rev=0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae#0348a8fd7ee8ab23d25f86bbbf2d89d91c5b18ae"
 dependencies = [
  "arrow-array",
  "arrow-schema",
